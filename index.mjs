@@ -1,7 +1,7 @@
 /**
  * dsh-rider Node half：Cordis 插件入口。
  *
- * 能力：`duckduckgo_search` 工具 —— 免费网络搜索。
+ * 能力一：`duckduckgo_search` 工具 —— 免费网络搜索。
  *   - 主引擎 DuckDuckGo（ddg-kit，社区维护的 duck-duck-scrape 兼容客户端）：
  *     bootstrap 取 VQD → preload 解析，失败自动回退 html/lite 表示；
  *     BOT_CHALLENGE 时按 cooldown 等待后重试一次。
@@ -13,19 +13,37 @@
  *   - 系统提示指引：order 115（> 内置 web_search 指引 110）——网络搜索优先
  *     使用本工具，内置 `web_search` 仅作最终后备。
  *
- * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md。
+ * 能力二：`vision_understand` 工具 —— 前置视觉理解。
+ *   - 当会话模型不支持图片输入（inputModalities 不含 image）而用户提供图片
+ *     （本地路径 / http(s) URL / data: URL）时，由本工具把图片交给 dsh 配置
+ *     中支持视觉的模型理解，返回文字描述。
+ *   - 模型选择：工具参数 provider/model 显式指定 > `dsh-rider` settings 命名
+ *     空间（visionProvider/visionModel）> 自动发现（遍历 ctx.llm 已注册提供商
+ *     的模型，取第一个声明 inputModalities 含 image 的）。
+ *   - 显式指定（参数或 settings）信任用户、跳过 inputModalities 过滤——已配置
+ *     但未声明 image 模态的视觉模型（如 siliconflow 的 GLM 系）仍可用。
+ *   - 图片必须经 ctx.attachments.saveImage 入库（adapter 经 readImage 取字节），
+ *     校验通过才构造 {type:'image', attachment} 消息块，走 ctx.llm.stream。
+ *
+ * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md 与
+ * decisions/implemented/2026-08-14-vision-preprocessor-tool.md。
  */
 
 import { execFile } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
 import { promisify } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import z from '@deepseek-ai/schemastery'
 import { DdgError, SafeSearchType, createDdgClient } from 'ddg-kit'
 
 const execFileAsync = promisify(execFile)
 
 export const name = 'dsh-rider'
 
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt', 'llm', 'attachments', 'settings', 'agentDefaultModel']
 
 const SAFE_SEARCH_MAP = {
   strict: SafeSearchType.STRICT,
@@ -166,7 +184,193 @@ function toOutput(engine, response) {
   }
 }
 
+/* =========================================================================
+ * 前置视觉理解（vision_understand）
+ * ========================================================================= */
+
+const IMAGE_EXT_MEDIA_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+}
+const MEDIA_TYPE_ALIASES = {
+  'image/jpg': 'image/jpeg',
+  'image/x-png': 'image/png',
+  'image/x-gif': 'image/gif',
+}
+const SUPPORTED_MEDIA_TYPES = new Set(Object.values(IMAGE_EXT_MEDIA_TYPES))
+const VISION_DEFAULT_PROMPT =
+  'Describe this image in detail, including any text, people, objects, layout, and context. 请详细描述这张图片的内容。'
+const VISION_TIMEOUT_MS = 120_000
+
+/** 归一化图片 media type：声明值（可带参数）与扩展名互相兜底，别名收敛到标准名。 */
+function normalizeMediaType(declared, ext) {
+  for (const candidate of [declared, IMAGE_EXT_MEDIA_TYPES[ext]]) {
+    if (!candidate) continue
+    const type = candidate.split(';')[0].trim().toLowerCase()
+    if (SUPPORTED_MEDIA_TYPES.has(type)) return type
+    const alias = MEDIA_TYPE_ALIASES[type]
+    if (alias) return alias
+  }
+  throw new Error(
+    `不支持的图片格式（声明「${declared ?? '无'}」、扩展名「${ext ?? '无'}」）；支持：${[...SUPPORTED_MEDIA_TYPES].join(', ')}`,
+  )
+}
+
+/**
+ * 解析图片来源为图片字节。三种形态：
+ *  - data:image/...;base64,...：直接解码；
+ *  - http(s) URL：fetch 下载，mediaType 取 Content-Type、扩展名兜底；
+ *  - 本地路径：readFile 读取（绝对路径或 dsh web 进程工作目录相对路径）。
+ */
+async function resolveImageSource(source, signal) {
+  const trimmed = String(source).trim()
+  if (trimmed === '') throw new Error('image 不能为空')
+  if (trimmed.startsWith('data:')) {
+    const match = /^data:([^;,]*)?(?:;[^,]*)?,(.*)$/s.exec(trimmed)
+    if (match === null) throw new Error('data URL 格式非法（应为 data:image/...;base64,...）')
+    const data = Buffer.from(match[2] ?? '', 'base64')
+    if (data.length === 0) throw new Error('data URL 未包含图片数据')
+    return { data, mediaType: normalizeMediaType(match[1] ?? '', ''), name: undefined }
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    let url
+    try {
+      url = new URL(trimmed)
+    } catch {
+      throw new Error(`图片 URL 非法：${trimmed}`)
+    }
+    const response = await fetch(url, { signal, redirect: 'follow' })
+    if (!response.ok) throw new Error(`下载图片失败：HTTP ${response.status}`)
+    const data = Buffer.from(await response.arrayBuffer())
+    if (data.length === 0) throw new Error('下载的图片为空')
+    return {
+      data,
+      mediaType: normalizeMediaType(response.headers.get('content-type') ?? '', extname(url.pathname)),
+      name: basename(url.pathname) || undefined,
+    }
+  }
+  const localMediaType = normalizeMediaType('', extname(trimmed))
+  let data
+  try {
+    data = await readFile(trimmed)
+  } catch (error) {
+    throw new Error(`读取本地图片失败（${error.code ?? error.name}）：${trimmed}（支持本地路径 / http(s) URL / data: URL）`)
+  }
+  if (data.length === 0) throw new Error('本地图片文件为空')
+  return { data, mediaType: localMediaType, name: basename(trimmed) || undefined }
+}
+
+/**
+ * 解析本次调用的视觉模型路由。优先级：
+ *  1. 工具参数 provider/model 显式指定（必须成对；信任用户，不查 inputModalities）；
+ *  2. settings（dsh-rider 命名空间）visionProvider/visionModel（同样视为用户显式选择）；
+ *  3. 自动发现：遍历 ctx.llm 已注册提供商，取第一个声明 inputModalities 含 image 的模型。
+ */
+async function resolveVisionModel(ctx, visionSettings, providerArg, modelArg) {
+  if ((providerArg === undefined) !== (modelArg === undefined)) {
+    throw new Error('provider 与 model 必须同时提供（或不提供以自动选择支持视觉的模型）')
+  }
+  if (providerArg !== undefined && modelArg !== undefined) {
+    return { provider: String(providerArg).trim(), model: String(modelArg).trim(), explicit: true }
+  }
+  const configured = visionSettings?.get() ?? {}
+  if (configured.visionProvider && configured.visionModel) {
+    return { provider: String(configured.visionProvider).trim(), model: String(configured.visionModel).trim(), explicit: true }
+  }
+  const providers = ctx.llm.listProviders()
+  for (const provider of providers) {
+    let models
+    try {
+      models = await ctx.llm.listModels(provider.id)
+    } catch {
+      continue
+    }
+    const vision = models.find((model) => model.inputModalities?.includes('image') === true)
+    if (vision !== undefined) return { provider: provider.id, model: vision.id, explicit: false }
+  }
+  const summary = providers.length === 0
+    ? '当前没有已注册的 LLM 提供商（ctx.llm 无路由）'
+    : providers.map((p) => `${p.id}（${p.name}）`).join('、')
+  throw new Error(
+    `未发现声明支持图片输入（inputModalities 含 image）的模型。可用提供商：${summary}。` +
+    '可任选其一：① 工具参数显式传 provider/model（信任用户，跳过模态过滤）；' +
+    '② 在 dsh 的 settings.yaml 对应 provider 的模型条目声明 `input: [text, image]` 后重启 web；' +
+    '③ 在 settings.yaml 的 `dsh-rider` 段配置 visionProvider/visionModel。',
+  )
+}
+
+/** 检查 dsh 当前默认会话模型是否已支持视觉，用于提示（失败静默，不阻断调用）。 */
+async function currentModelVisionNote(ctx, signal) {
+  try {
+    const selection = ctx.agentDefaultModel.currentSelection()
+    const info = await ctx.llm.resolveModelInfo(selection.provider, selection.model, signal)
+    if (info.inputModalities?.includes('image') === true) {
+      return `当前会话默认模型 ${selection.provider}/${selection.model} 已声明支持图片输入，通常无需前置视觉处理`
+    }
+  } catch {
+    // 默认模型未配置 / 路由未注册 / 元数据不可用：无法判断，不提示
+  }
+  return undefined
+}
+
+/** 图片入库（durable ref）→ 构造 user 消息（text + image 块）→ 流式调用视觉模型并收集文本。 */
+async function runVisionCall(ctx, { provider, model, image, prompt, signal }) {
+  const limits = ctx.attachments.imageLimits
+  if (image.data.length > limits.maxImageBytes) {
+    throw new Error(`图片 ${image.data.length} 字节超过限制 ${limits.maxImageBytes} 字节`)
+  }
+  const ref = await ctx.attachments.saveImage({ data: image.data, mediaType: image.mediaType, name: image.name })
+  const message = createUserMessage({
+    content: [
+      { type: 'text', text: prompt },
+      { type: 'image', attachment: ref },
+    ],
+    source: { kind: 'user' },
+  })
+  let text = ''
+  let reasoning = ''
+  for await (const chunk of ctx.llm.stream({ provider, model, messages: [message], signal })) {
+    if (chunk.type === 'text-delta') text += chunk.text
+    else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
+    else if (chunk.type === 'finish') {
+      if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+        const failure = chunk.reason.failure
+        throw new Error(`视觉模型 ${provider}/${model} 调用失败（${failure.code}）：${failure.message}`)
+      }
+    }
+  }
+  if (text.trim() === '') {
+    throw new Error(`视觉模型 ${provider}/${model} 未返回文本描述${reasoning.trim() === '' ? '' : '（仅返回了推理过程）'}`)
+  }
+  return {
+    provider,
+    model,
+    text: text.trim(),
+    reasoning: reasoning.trim() === '' ? undefined : reasoning.trim(),
+    image: {
+      name: image.name,
+      mediaType: ref.mediaType,
+      width: ref.width,
+      height: ref.height,
+      bytes: ref.bytes,
+    },
+  }
+}
+
+/** dsh-rider settings 命名空间：前置视觉理解的默认模型选择（均为可选）。 */
+const VISION_SETTINGS_NS = settingsNamespace('dsh-rider')
+const VISION_SETTINGS_SCHEMA = z.object({
+  visionProvider: z.string(),
+  visionModel: z.string(),
+  visionPrompt: z.string(),
+})
+
 export function apply(ctx) {
+  const visionSettings = ctx.settings.register(VISION_SETTINGS_NS, VISION_SETTINGS_SCHEMA, { applies: 'live' })
+
   ctx.tools.register(defineTool({
     name: 'duckduckgo_search',
     description: 'Search the web with the free DuckDuckGo engine (via ddg-kit, no API key or quota), with automatic fallback to Bing when DuckDuckGo is unreachable or rate-limited. Returns a list of results with title, URL, and description.',
@@ -229,6 +433,79 @@ export function apply(ctx) {
       }
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'vision_understand',
+    description: 'Front-loaded vision understanding: when the conversation model cannot accept image input (no image modality) and the user provides an image (local file path, http(s) URL, or data: URL), call a vision-capable model configured in DSH to describe the image, and return the description as text. Model selection: explicit provider/model arguments (must be given together) > dsh-rider settings visionProvider/visionModel > first model discovered with image input modality. 前置视觉理解：当你的模型不支持图片输入、而用户提供了图片（本地路径 / http(s) URL / data: URL）时，用 dsh 配置中支持视觉的模型理解图片并返回文字描述。',
+    parameters: {
+      image: {
+        type: 'string',
+        required: true,
+        description: '图片来源：本地文件绝对路径（或 dsh 工作目录相对路径）/ http(s) URL / data:image/...;base64,...。支持 png/jpeg/webp/gif。',
+      },
+      prompt: {
+        type: 'string',
+        description: `给视觉模型的指令（默认：「${VISION_DEFAULT_PROMPT}」）。可用 settings 的 dsh-rider.visionPrompt 全局覆盖。`,
+      },
+      provider: {
+        type: 'string',
+        description: '视觉模型提供商路由（dsh 已配置，如 deepseek-official / openai / siliconflow）。必须与 model 同时提供；缺省用 settings 或自动发现。',
+      },
+      model: {
+        type: 'string',
+        description: '视觉模型 id（该提供商下的模型）。必须与 provider 同时提供；缺省用 settings 或自动发现。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider: { type: 'string', required: true },
+          model: { type: 'string', required: true },
+          text: { type: 'string', required: true },
+          reasoning: { type: 'string' },
+          note: { type: 'string' },
+          image: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              mediaType: { type: 'string', required: true },
+              width: { type: 'number', required: true },
+              height: { type: 'number', required: true },
+              bytes: { type: 'number', required: true },
+            },
+          },
+        },
+      },
+      render(args, value) {
+        const lines = [`视觉模型 ${value.provider}/${value.model} 对图片的理解：`, value.text]
+        if (value.note) lines.push(`（注意：${value.note}）`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    timeoutMs: VISION_TIMEOUT_MS,
+    async execute(args, exec) {
+      const signal = exec?.signal
+      const image = await resolveImageSource(args.image, signal)
+      const prompt = (args.prompt ?? visionSettings.get()?.visionPrompt ?? VISION_DEFAULT_PROMPT).trim()
+      if (prompt === '') throw new Error('prompt 不能为空')
+      const vision = await resolveVisionModel(ctx, visionSettings, args.provider, args.model)
+      const note = await currentModelVisionNote(ctx, signal)
+      const result = await runVisionCall(ctx, { provider: vision.provider, model: vision.model, image, prompt, signal })
+      return { ...result, note }
+    },
+  }))
+
+  ctx.systemPrompt.section({
+    name: 'tool:vision',
+    order: 116,
+    text: [
+      'When the conversation model does not support image input and the user provides an image (local file path, http(s) URL, or data: URL), do not try to interpret it directly: call `vision_understand` with the image source, then relay the returned description to the user.',
+      '你的模型不支持图片输入、而用户提供了图片（本地路径 / http(s) URL / data: URL）时，调用 `vision_understand` 让 dsh 配置的视觉模型理解图片，再把返回的描述转述给用户。',
+    ].join('\n'),
+  })
 
   ctx.systemPrompt.section({
     name: 'tool:duckduckgo',

@@ -1,7 +1,9 @@
 <h1 align="center">dsh-rider</h1>
 
 <p align="center">
-  DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）。
+  DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）
+  + 前置视觉理解工具 <code>vision_understand</code>（会话模型不支持图片时，
+  用 dsh 配置的支持视觉的模型理解图片）。
   DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
   自动回退 Bing。并注入系统提示指引让 agent 优先使用它（内置 deepseek 网页搜索仅作最终后备）。
 </p>
@@ -13,6 +15,7 @@
 | 工具 | 说明 |
 |---|---|
 | `duckduckgo_search` | 免费网络搜索：DuckDuckGo（[ddg-kit](https://github.com/lennney/ddg-kit)）优先，失败自动回退 Bing；返回标题/URL/摘要列表，`engine` 字段标明实际来源 |
+| `vision_understand` | 前置视觉理解：会话模型不支持图片输入时，把图片（本地路径 / http(s) URL / data: URL）交给 dsh 配置中支持视觉的模型理解，返回文字描述；模型选择：工具参数 > settings（`dsh-rider.visionProvider/visionModel`）> 自动发现 |
 
 ### MCP servers
 
@@ -22,6 +25,54 @@
 ### Skills
 
 当前无 skill；仓库按多能力插件规划，后续能力以 SKILL.md 模式在 `skills/` 扩展。
+
+## 前置视觉理解（vision_understand）
+
+**使用场景**：会话模型不支持图片输入（无 image 模态，如 `deepseek-v4-flash`）、
+而用户提供了图片时，agent 调用 `vision_understand` 让支持视觉的模型理解图片，
+再把返回的描述转述给用户。系统提示已注入指引（`tool:vision` 段），模型会自动
+优先走此路径。
+
+```
+工具：vision_understand
+参数：
+  image    (必填) 图片来源：本地文件路径 / http(s) URL / data:image/...;base64,...
+  prompt   (可选) 给视觉模型的指令（默认详细描述图片）
+  provider (可选) 视觉模型提供商路由（如 deepseek-official / openai / siliconflow）
+  model    (可选) 视觉模型 id（须与 provider 同时提供）
+```
+
+**视觉模型选择优先级**：
+
+1. 工具参数 `provider` + `model`（显式指定即信任用户，不检查模态声明）；
+2. settings 配置（`$DSH_HOME/settings.yaml` 的 `dsh-rider:` 段，
+   `visionProvider` / `visionModel` / `visionPrompt`，live 生效）；
+3. 自动发现：遍历 dsh 已注册提供商，取第一个声明支持图片输入的模型
+   （`inputModalities` 含 `image`）。
+
+```yaml
+# settings.yaml 示例：固定视觉模型（可选）
+dsh-rider:
+  visionProvider: siliconflow
+  visionModel: zai-org/GLM-5.2
+  visionPrompt: 请详细描述这张图片的内容
+```
+
+**注意**：pi-ai 手写配置的提供商（如 siliconflow）若模型条目未声明
+`input: [text, image]`，自动发现会跳过它（避免把图片发给纯文本模型）。
+此类模型请用参数/settings 显式指定，或在模型条目声明模态：
+
+```yaml
+llm-pi-ai:
+  providers:
+    siliconflow:
+      models:
+        - id: zai-org/GLM-5.2
+          input: [text, image]   # 声明支持图片输入后，自动发现也会选中
+```
+
+返回结构：`{ provider, model, text, reasoning?, note?, image: {mediaType, width, height, bytes} }`；
+`note` 在会话模型已支持视觉时给出提示（不阻断）。
 
 ## 搜索工具选择（系统提示指引）
 
@@ -115,8 +166,11 @@ dsh plugin --profile web add .
 ## 开发
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
-  （`duckduckgo_search` 工具 + 系统提示指引）；搜索实现依赖 `ddg-kit@0.1.1`
-  （声明在 dependencies，随包安装进 profile 闭包）。
+  （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
+  settings 命名空间）；搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，
+  随包安装进 profile 闭包）；视觉能力全部走官方服务（`ctx.llm` /
+  `ctx.attachments` / `ctx.settings` / `ctx.agentDefaultModel`，零新增依赖）。
 - 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
-  stub 做真实 import 与 apply() 注册形状校验，无需 node_modules）。
+  stub 做真实 import 与 apply() 注册形状校验；`vision-execute` 门禁用全服务
+  fake ctx 跑工具 execute 的成功/失败路径冒烟，均无需 node_modules）。
 - 决策记录：`decisions/implemented/`。

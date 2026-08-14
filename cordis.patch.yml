@@ -1,7 +1,9 @@
 # dsh-rider 组合层（bundle patch）。
 # 当前能力：dsh-rider —— 本包 Node half（index.mjs）：注册免费网络搜索工具
 # duckduckgo_search（DuckDuckGo via ddg-kit + 系统代理，Bing 自动后备），并注入
-# 系统提示指引让 agent 优先使用它（内置 web_search 仅作最终后备）。
+# 系统提示指引让 agent 优先使用它（内置 web_search 仅作最终后备）；以及前置视觉
+# 理解工具 vision_understand（会话模型无图片输入能力时，用 dsh 配置的支持视觉的
+# 模型理解图片并返回文字，模型选择：工具参数 > dsh-rider settings > 自动发现）。
 # 后续新能力（更多工具 / MCP server / skill）在此文件追加 insert/config 行即可。
 #
 # 启停：在 profile 层（$DSH_HOME/profiles/web/cordis.patch.yml）用 id 覆盖，

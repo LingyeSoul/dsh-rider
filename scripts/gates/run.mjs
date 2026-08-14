@@ -26,8 +26,13 @@ const CATEGORIES = new Set(["feature", "bug-fix", "simplification", "architectur
 const ENTRY_KEYS = new Set(["id", "name", "config", "disabled"]);
 // 本仓库组合层允许的 insert 入口（当前仅自身 Node half；后续能力扩展时追加）。
 const ALLOWED_ENTRY_NAMES = new Set(["dsh-rider"]);
-const ENTRY_INJECT_REQUIRED = ["tools", "systemPrompt"];
+const ENTRY_INJECT_REQUIRED = ["tools", "systemPrompt", "llm", "attachments", "settings", "agentDefaultModel"];
 const SECTION_MIN_ORDER = 110; // 内置 dsh-tool-web 的 web_search 指引 order，必须在其后
+// 本仓库注册的工具白名单：工具名 → 必填参数（参数级形状在 checkApply 内逐工具校验）。
+const EXPECTED_TOOLS = {
+  duckduckgo_search: { requiredParams: ["query"] },
+  vision_understand: { requiredParams: ["image"] },
+};
 
 /* ----------------------------- YAML 子集解析器 ----------------------------- */
 
@@ -240,6 +245,12 @@ const DDG_KIT_STUB_JS = [
 ].join("\n");
 const DSH_TOOLS_STUB_PKG = '{"name":"@deepseek-ai/dsh-tools","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const DSH_TOOLS_STUB_JS = "export function defineTool(options) { return options; }\n";
+const DSH_LLM_STUB_PKG = '{"name":"@deepseek-ai/dsh-llm","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
+const DSH_LLM_STUB_JS = "export function createUserMessage(input) { return { id: 'msg-stub', ...input }; }\n";
+const DSH_SETTINGS_STUB_PKG = '{"name":"@deepseek-ai/dsh-settings","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
+const DSH_SETTINGS_STUB_JS = "export function settingsNamespace(value) { return value; }\n";
+const SCHEMASTERY_STUB_PKG = '{"name":"@deepseek-ai/schemastery","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
+const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nexport default { object: (shape) => ({ __shape: shape }), string };\n";
 
 /** 仓库无 node_modules 时生成最小 stub（运行后删除）。 */
 function ensureEntryStubs() {
@@ -254,6 +265,9 @@ function ensureEntryStubs() {
   };
   writeStub("ddg-kit", DDG_KIT_STUB_PKG, DDG_KIT_STUB_JS);
   writeStub("@deepseek-ai/dsh-tools", DSH_TOOLS_STUB_PKG, DSH_TOOLS_STUB_JS);
+  writeStub("@deepseek-ai/dsh-llm", DSH_LLM_STUB_PKG, DSH_LLM_STUB_JS);
+  writeStub("@deepseek-ai/dsh-settings", DSH_SETTINGS_STUB_PKG, DSH_SETTINGS_STUB_JS);
+  writeStub("@deepseek-ai/schemastery", SCHEMASTERY_STUB_PKG, SCHEMASTERY_STUB_JS);
   return created;
 }
 
@@ -295,6 +309,10 @@ function checkApply(mod) {
   const fakeCtx = {
     tools: { register: (tool) => { tools.push(tool); } },
     systemPrompt: { section: (section) => { sections.push(section); } },
+    settings: { register: () => ({ get: () => ({}) }) },
+    llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
+    attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
+    agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
   };
   mod.apply(fakeCtx);
   if (tools.length === 0) {
@@ -303,6 +321,11 @@ function checkApply(mod) {
     for (const tool of tools) {
       if (typeof tool.name !== "string" || tool.name === "") problems.push("工具缺少 name");
       if (typeof tool.description !== "string" || tool.description === "") problems.push(`工具 ${tool.name} 缺少 description`);
+      const expected = EXPECTED_TOOLS[tool.name];
+      if (!expected) {
+        problems.push(`工具 ${tool.name} 不在白名单（${Object.keys(EXPECTED_TOOLS).join(", ")}）——新增工具须同步门禁`);
+        continue;
+      }
       // parameters 是作者层「隐式属性映射」，由 dsh-tools 的 defineTool 在加载时编译为
       // JSON schema（见 @deepseek-ai/dsh-tools 的 parameterSchemaSpecToJsonSchema）。这里只校验
       // 作者层形状——禁止把编译后形态 { type:'object', properties, required:[] } 直接当 parameters
@@ -311,7 +334,9 @@ function checkApply(mod) {
       if (typeof params !== "object" || params === null || Array.isArray(params)) {
         problems.push(`工具 ${tool.name} parameters 必须是属性映射对象`);
       } else {
-        if (params.query === undefined) problems.push(`工具 ${tool.name} parameters 缺少 query 属性`);
+        for (const key of expected.requiredParams) {
+          if (params[key] === undefined) problems.push(`工具 ${tool.name} parameters 缺少 ${key} 属性`);
+        }
         for (const [key, spec] of Object.entries(params)) {
           if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
             problems.push(`工具 ${tool.name} parameters.${key} 必须是 value schema 对象（不是 ${typeof spec}）`);
@@ -319,7 +344,11 @@ function checkApply(mod) {
             problems.push(`工具 ${tool.name} parameters.${key} 缺少 type`);
           }
         }
-        if (params.query !== undefined && params.query.required !== true) problems.push(`工具 ${tool.name} parameters.query 必须声明 required: true`);
+        for (const key of expected.requiredParams) {
+          if (params[key] !== undefined && params[key].required !== true) {
+            problems.push(`工具 ${tool.name} parameters.${key} 必须声明 required: true`);
+          }
+        }
       }
       if (tool.output?.schema?.type !== "object") problems.push(`工具 ${tool.name} output.schema 必须是 object-rooted`);
       else if (typeof tool.output.schema.additionalProperties !== "boolean") problems.push(`工具 ${tool.name} output.schema.additionalProperties 必须显式声明 true/false`);
@@ -450,6 +479,8 @@ const entryGate = gate(
       ["缺 apply", 'export const name = "x";\nexport const inject = ["tools", "systemPrompt"];\n', true],
       ["inject 缺 systemPrompt", 'export const name = "x";\nexport const inject = ["tools"];\nexport function apply(ctx) { ctx.systemPrompt.section({ name: "s", order: 115, text: "t" }); }', true],
       ["工具名不符", 'export const name = "x";\nexport const inject = ["tools", "systemPrompt"];\nexport function apply(ctx) { ctx.tools.register({ name: "wrong_tool", description: "d", parameters: { query: { type: "string", required: true } }, output: { schema: { type: "object", additionalProperties: false } }, execute: async () => ({}) }); }', true],
+      ["vision 缺 image 参数", 'export const name = "x";\nexport const inject = ["tools", "systemPrompt"];\nexport function apply(ctx) { ctx.tools.register({ name: "vision_understand", description: "d", parameters: { prompt: { type: "string" } }, output: { schema: { type: "object", additionalProperties: false } }, execute: async () => ({}) });\n  ctx.systemPrompt.section({ name: "s", order: 115, text: "t" }); }', true],
+      ["vision 参数缺 required", 'export const name = "x";\nexport const inject = ["tools", "systemPrompt"];\nexport function apply(ctx) { ctx.tools.register({ name: "vision_understand", description: "d", parameters: { image: { type: "string" } }, output: { schema: { type: "object", additionalProperties: false } }, execute: async () => ({}) });\n  ctx.systemPrompt.section({ name: "s", order: 115, text: "t" }); }', true],
       ["提示段 order 不够高", 'export const name = "x";\nexport const inject = ["tools", "systemPrompt"];\nexport function apply(ctx) { ctx.systemPrompt.section({ name: "s", order: 100, text: "t" }); }', true],
     ];
     for (const [label, src, expect] of fixtures) {
@@ -458,6 +489,148 @@ const entryGate = gate(
       if (expect && problems2.length === 0) problems.push(`非法 entry 未被拒绝（${label}）`);
       if (!expect && problems2.length > 0) problems.push(`合法 entry 被误拒（${label}）：${problems2.join("; ")}`);
     }
+    return problems;
+  },
+);
+
+/* -------------------------- vision-execute 门禁 -------------------------- */
+
+const VISION_PNG_1PX =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/** 用给定服务行为构造 fake ctx，apply 后取出 vision_understand 工具。 */
+function makeVisionHarness(overrides) {
+  const registeredTools = [];
+  const sections = [];
+  const ctx = {
+    tools: { register: (tool) => { registeredTools.push(tool); } },
+    systemPrompt: { section: (section) => { sections.push(section); } },
+    settings: { register: () => ({ get: () => overrides.settingsValue ?? {} }) },
+    attachments: {
+      imageLimits: {
+        maxImageBytes: 10 * 1024 * 1024,
+        maxImagesPerMessage: 8,
+        maxMessageImageBytes: 10 * 1024 * 1024,
+        maxImagePixels: 40_000_000,
+        mediaTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+      },
+      saveImage: overrides.saveImage ?? (async (input) => ({
+        attachmentId: "a1",
+        mediaType: input.mediaType,
+        bytes: input.data.length,
+        width: 1,
+        height: 1,
+        name: input.name,
+      })),
+      readImage: async (ref) => ({ ref, data: new Uint8Array() }),
+    },
+    llm: {
+      listProviders: () => overrides.providers ?? [{ id: "openai", name: "OpenAI" }],
+      listModels: async (provider) => (overrides.models ?? [
+        { provider: "openai", id: "gpt-4o", name: "GPT-4o", inputModalities: ["text", "image"] },
+      ]).filter((model) => model.provider === provider),
+      resolveModelInfo: async (provider, model) => ({ provider, id: model, name: model, inputModalities: ["text", "image"] }),
+      stream: overrides.stream ?? (async function* () {
+        yield { type: "text-delta", index: 0, text: "a yellow cat on a sofa" };
+        yield { type: "finish", index: 0, reason: { kind: "stop" } };
+      }),
+    },
+    agentDefaultModel: { currentSelection: () => overrides.defaultModel ?? { provider: "deepseek-official", model: "deepseek-v4-flash" } },
+  };
+  return { ctx, registeredTools, sections };
+}
+
+/** apply 一次并执行 vision_understand.execute。 */
+async function runVisionTool(mod, overrides, args) {
+  const { ctx, registeredTools } = makeVisionHarness(overrides);
+  mod.apply(ctx);
+  const tool = registeredTools.find((tool2) => tool2.name === "vision_understand");
+  if (!tool) throw new Error("apply() 未注册 vision_understand");
+  return tool.execute(args, { signal: new AbortController().signal });
+}
+
+/** 成功结果形状断言。 */
+function assertVisionSuccess(result, problems, label) {
+  if (result.provider !== "openai" || result.model !== "gpt-4o") {
+    problems.push(`${label}：provider/model 解析错误（${result.provider}/${result.model}）`);
+  }
+  if (typeof result.text !== "string" || result.text.trim() === "") problems.push(`${label}：未返回文本`);
+  if (result.image?.width !== 1 || result.image?.height !== 1) problems.push(`${label}：image 元数据缺失`);
+}
+
+/** 断言 thunk 抛错且错误信息匹配。 */
+async function expectVisionThrow(thunk, pattern, problems, label) {
+  try {
+    await thunk();
+    problems.push(`失败路径（${label}）未抛错`);
+  } catch (error) {
+    if (!pattern.test(error.message)) problems.push(`失败路径（${label}）错误信息不符：${error.message}`);
+  }
+}
+
+const visionExecuteGate = gate(
+  "vision-execute",
+  async () => {
+    const created = ensureEntryStubs();
+    try {
+      const mod = await import(pathToFileURL(join(ROOT, "index.mjs")).href);
+      const problems = [];
+      // 成功路径 1：自动发现声明 image 模态的模型
+      try {
+        const { ctx, registeredTools } = makeVisionHarness({});
+        mod.apply(ctx);
+        const tool = registeredTools.find((t) => t.name === "vision_understand");
+        const result = await tool.execute({ image: VISION_PNG_1PX, prompt: "what is this?" }, { signal: new AbortController().signal });
+        assertVisionSuccess(result, problems, "自动发现");
+        const rendered = tool.output.render({ image: VISION_PNG_1PX }, result);
+        if (!Array.isArray(rendered) || rendered[0]?.type !== "text" || !String(rendered[0].text).includes("yellow cat")) {
+          problems.push(`自动发现：render 投影未包含视觉描述（${JSON.stringify(rendered)}）`);
+        }
+      } catch (error) {
+        problems.push(`成功路径（自动发现）抛错：${error.message}`);
+      }
+      // 成功路径 2：显式 provider/model（无视觉模型可发现时信任用户）
+      try {
+        const result = await runVisionTool(mod, { models: [{ provider: "openai", id: "gpt-4o", name: "GPT-4o" }] }, { image: VISION_PNG_1PX, provider: "openai", model: "gpt-4o" });
+        if (result.provider !== "openai" || result.model !== "gpt-4o") problems.push(`显式指定解析错误：${result.provider}/${result.model}`);
+      } catch (error) {
+        problems.push(`成功路径（显式指定）抛错：${error.message}`);
+      }
+      // 成功路径 3：settings 指定（信任用户，跳过模态过滤）
+      try {
+        const result = await runVisionTool(
+          mod,
+          { models: [{ provider: "openai", id: "gpt-4o", name: "GPT-4o" }], settingsValue: { visionProvider: "openai", visionModel: "gpt-4o" } },
+          { image: VISION_PNG_1PX },
+        );
+        if (result.provider !== "openai" || result.model !== "gpt-4o") problems.push(`settings 指定解析错误：${result.provider}/${result.model}`);
+      } catch (error) {
+        problems.push(`成功路径（settings 指定）抛错：${error.message}`);
+      }
+      // 失败路径
+      await expectVisionThrow(() => runVisionTool(mod, { models: [] }, { image: VISION_PNG_1PX }), /未发现/, problems, "无视觉模型");
+      await expectVisionThrow(() => runVisionTool(mod, {}, { image: VISION_PNG_1PX, provider: "openai" }), /同时提供/, problems, "provider 缺 model");
+      await expectVisionThrow(() => runVisionTool(mod, {}, { image: "C:/nonexistent/x.bmp" }), /不支持的图片格式/, problems, "bmp mediaType");
+      await expectVisionThrow(() => runVisionTool(mod, {}, { image: "Z:/no/such/file.png" }), /读取本地图片失败/, problems, "本地路径不存在");
+      await expectVisionThrow(
+        () => runVisionTool(mod, { stream: async function* () { yield { type: "finish", index: 0, reason: { kind: "error", failure: { code: "X", message: "boom" } } }; } }, { image: VISION_PNG_1PX }),
+        /boom/,
+        problems,
+        "error finish",
+      );
+      return problems;
+    } finally {
+      removeEntryStubs(created);
+    }
+  },
+  async () => {
+    const problems = [];
+    const p1 = [];
+    assertVisionSuccess({ provider: "openai", model: "gpt-4o", text: "", image: { width: 1, height: 1 } }, p1, "坏样例");
+    if (p1.length === 0) problems.push("自证失败：空文本坏样例未被成功断言拒绝");
+    const p2 = [];
+    await expectVisionThrow(async () => {}, /x/, p2, "坏样例");
+    if (p2.length === 0) problems.push("自证失败：永不抛错的坏样例未被拒绝");
     return problems;
   },
 );
@@ -544,7 +717,7 @@ const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1] : null;
 let failed = 0;
 
-for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, mdLinksGate, decisionsGate]) {
+for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, mdLinksGate, decisionsGate]) {
   if (only && g.name !== only) continue;
   const self = await g.selfTest();
   if (self.length > 0) {

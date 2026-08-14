@@ -1,7 +1,7 @@
 {
   "name": "dsh-rider",
-  "version": "0.2.0",
-  "description": "DSH plugin: free web search tool (DuckDuckGo via ddg-kit with system-proxy support, automatic Bing fallback). Official bundle plugin, install: dsh plugin --profile web add github:LingyeSoul/dsh-rider#main。DSH 插件：免费网络搜索（duckduckgo_search 工具）。",
+  "version": "0.3.0",
+  "description": "DSH plugin: free web search tool (DuckDuckGo via ddg-kit with system-proxy support, automatic Bing fallback) + front-loaded vision understanding tool (vision_understand: understand images via a vision-capable model configured in DSH when the conversation model has no image modality). Official bundle plugin, install: dsh plugin --profile web add github:LingyeSoul/dsh-rider#main。DSH 插件：免费网络搜索（duckduckgo_search 工具）+ 前置视觉理解（vision_understand 工具）。",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -19,7 +19,10 @@
     "duckduckgo",
     "ddg-kit",
     "bing",
-    "search"
+    "search",
+    "vision",
+    "image-understanding",
+    "multimodal"
   ],
   "files": [
     "index.mjs",
