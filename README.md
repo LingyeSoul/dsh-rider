@@ -2,8 +2,9 @@
 
 <p align="center">
   DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）
-  + 前置视觉理解工具 <code>vision_understand</code>（会话模型不支持图片时，
-  用 dsh 配置的支持视觉的模型理解图片）。
+  + 前置视觉理解工具 <code>vision_understand</code>（会话模型不支持图片时，用 dsh 配置的
+  支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 视觉模型图片模态声明（pi-ai 手写
+  provider 的 <code>input:[text,image]</code> 补丁，dsh 面板不暴露该字段）。
   DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
   自动回退 Bing。并注入系统提示指引让 agent 优先使用它（内置 deepseek 网页搜索仅作最终后备）。
 </p>
@@ -15,7 +16,7 @@
 | 工具 | 说明 |
 |---|---|
 | `duckduckgo_search` | 免费网络搜索：DuckDuckGo（[ddg-kit](https://github.com/lennney/ddg-kit)）优先，失败自动回退 Bing；返回标题/URL/摘要列表，`engine` 字段标明实际来源 |
-| `vision_understand` | 前置视觉理解：会话模型不支持图片输入时，把图片（本地路径 / http(s) URL / data: URL）交给 dsh 配置中支持视觉的模型理解，返回文字描述；模型选择：工具参数 > settings（`dsh-rider.visionProvider/visionModel`）> 自动发现 |
+| `vision_understand` | 前置视觉理解：会话模型不支持图片输入时，把图片（本地路径 / http(s) URL / data: URL）交给 dsh 配置中支持视觉的模型理解，返回文字描述；模型选择：工具参数 > settings（`dsh-rider.visionProvider/visionModel`）> 自动发现。注意所选视觉模型必须在 pi-ai 声明 `input` 含 image（见「为视觉模型补图片模态声明」） |
 
 ### MCP servers
 
@@ -59,7 +60,7 @@
 
 **视觉模型选择优先级**：
 
-1. 工具参数 `provider` + `model`（显式指定即信任用户，不检查模态声明）；
+1. 工具参数 `provider` + `model`（显式指定跳过 dsh-rider 自己的自动发现过滤，但**绕不过** pi-ai provider 在 `ctx.llm.stream` 内部对 `model.input` 的强制校验——见下文「为视觉模型补图片模态声明」）；
 2. settings 配置（`$DSH_HOME/settings.yaml` 的 `dsh-rider:` 段，
    `visionProvider` / `visionModel` / `visionPrompt`，live 生效）；
 3. 自动发现：遍历 dsh 已注册提供商，取第一个声明支持图片输入的模型
@@ -74,8 +75,9 @@ dsh-rider:
 ```
 
 **注意**：pi-ai 手写配置的提供商（如 siliconflow）若模型条目未声明
-`input: [text, image]`，自动发现会跳过它（避免把图片发给纯文本模型）。
-此类模型请用参数/settings 显式指定，或在模型条目声明模态：
+`input: [text, image]`，视觉调用会以 `UNSUPPORTED_CONTENT` 失败——pi-ai provider 在
+`ctx.llm.stream` 内部强制校验 `model.input`（dsh 面板不暴露该字段）。dsh-rider 提供
+「为视觉模型补图片模态声明」卡片一键补声明（见下文），等效于手改：
 
 ```yaml
 llm-pi-ai:
@@ -113,8 +115,8 @@ dsh-rider 设置页提供「图片理解」卡片，**绕开对话流**直接看
 DSH 对纯文本会话模型的图片准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAGES`）——纯文本模型下
 也能在对话里顺手粘贴看图，无需切设置页。
 
-- 默认开。若会话模型支持图片、想用原生「粘贴即附件」，在 **设置 → dsh-rider** 页关闭
-  「在对话输入框捕获粘贴/拖拽的图片」即可（状态持久化到本机）。
+- 默认关（避免在支持图片的会话模型上拦截原生粘贴附件）。纯文本会话模型下想用时，在
+  **设置 → dsh-rider** 页打开「在对话输入框捕获粘贴/拖拽的图片」即可（状态持久化到本机）。
 - 复用同一个 `/api/dsh-rider-vision/understand` 路由与视觉调用逻辑，模型选择优先级
   与 `vision_understand` / 图片理解卡片一致（工具参数 > settings > 自动发现）。
 - 文字粘贴不被拦截，正常落入输入框；含图片的粘贴才走视觉路由。
@@ -144,8 +146,9 @@ dsh web 生效**（pi-ai 路由是注册级事实）。
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /
-视觉模型 / 默认指令），保存即写入 `dsh-rider` settings 命名空间（live 生效，
-无需重启）。等效于手改 `settings.yaml`：
+视觉模型 / 默认指令，保存即写入 `dsh-rider` settings 命名空间，live 生效无需重启）
++ 三张卡片（「为视觉模型补图片模态声明」「对话粘贴捕获开关」「图片理解」）。等效于
+手改 `settings.yaml`：
 
 ```yaml
 dsh-rider:
@@ -256,10 +259,11 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间 + `/api/dsh-rider-vision` 配置读写 + 图片理解路由）；`client/index.js` =
-  client half（`settings.section` 独立设置页 + `conversation.input.dock` 对话粘贴图片
-  捕获，CJS 源码即产物，零构建链）；
-  搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闭包）；
+  settings 命名空间 + 三条自建 HTTP 路由：`/api/dsh-rider-vision` 配置读写、
+  `/api/dsh-rider-vision/understand` 图片理解、`/api/dsh-rider-vision/declare`
+  图片模态声明）；`client/index.js` = client half（`settings.section` 独立设置页
+  含三张卡片 + `conversation.input.dock` 对话粘贴图片捕获，CJS 源码即产物，零构建链）；
+  搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闘包）；
   视觉能力全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
   `ctx.agentDefaultModel` / `ctx.webServer`，零新增依赖）。
 - 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
