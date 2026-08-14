@@ -46,12 +46,12 @@
  *   - GET 读 dsh-rider 段三个字段的 user 层覆盖值与 resolved 值；
  *   - POST 写：update 合并 patch（字段置值）/ replace({}) 清空 user 层（重置）。
  *   - POST '/api/dsh-rider-vision/understand'：图片理解——client half 设置页的
- *     「图片理解」卡片粘贴/上传图片（base64 data URL）经此路由，handler 在 host
- *     进程内复用 vision_understand 的 resolveImageSource/resolveVisionModel/
+ *     「图片理解」卡片与对话 dock 粘贴捕获的图片（base64 data URL）经此路由，handler
+ *     在 host 进程内复用 vision_understand 的 resolveImageSource/resolveVisionModel/
  *     runVisionCall 直接走 ctx.llm.stream 调视觉模型，返回文字描述。**不经 DSH
  *     对话流**（apiproxy prompt handler 的图片准入拦截不触发），是纯文本会话模型
- *     下"粘贴图片看图"的正解——用户在 dsh-rider 设置页粘贴图片，而非在对话流
- *     发送（后者会被框架拦截）。
+ *     下"粘贴图片看图"的正解。取消信号用 res 的 'close'（客户端真断开）而非 req 的
+ *     'close'（后者在请求体读完即触发，会把进行中的视觉调用误判为取消 → 499）。
  *
  * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md、
  * 2026-08-14-vision-preprocessor-tool.md 与
@@ -635,7 +635,11 @@ export function apply(ctx) {
             res.end(JSON.stringify(body))
           }
           const ac = new AbortController()
-          req?.on?.('close', () => { if (!res.writableEnded) ac.abort() })
+          // 用 res 的 'close' 而非 req 的：Node 的 IncomingMessage 'close' 在请求体
+          // 读完（请求完成）时即触发，会把还在进行的视觉流式调用误判为客户端取消
+          // → 499（图片越大越必现，因为 body 读完时视觉调用尚未结束）。res 的 'close'
+          // 只在底层连接在 res.end() 之前终止（客户端真断开）时触发，才是取消信号。
+          res?.on?.('close', () => { if (!res.writableEnded) ac.abort() })
           try {
             if (req?.method !== 'POST') {
               send(405, { ok: false, message: 'method not allowed' })
