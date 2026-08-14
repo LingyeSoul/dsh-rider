@@ -1,21 +1,26 @@
 /**
- * dsh-rider client half：dsh 设置 → 插件页面的配置卡片。
+ * dsh-rider client half：设置 → 导航里的「dsh-rider」设置页。
  *
- * 在「设置 → 插件」的 configurable tab（settings.plugin.item slot）注册一张
- * dsh-rider 卡片，编辑前置视觉理解的默认配置（visionProvider / visionModel /
- * visionPrompt），保存写入 `dsh-rider` settings 命名空间（live 生效）。
+ * 注册一张独立的 settings.section 设置页（order 50），编辑前置视觉理解的
+ * 默认配置（visionProvider / visionModel / visionPrompt）。数据通道走 Node half
+ * 自建的 HTTP 路由 `/api/dsh-rider-vision`（fetch GET 读 / POST 写或重置），
+ * 而非官方 settingsScope wire —— 后者要求目标 settings namespace 被 apiproxy
+ * 显式暴露给 Web client（WEB_SETTINGS_NAMESPACES 硬编码 allowlist，rc.6 第三方
+ * 插件 namespace 不在内，卡片必然 return null）。host 路由 handler 在进程内
+ * 直连 ctx.settings scope（applies:'live'，写即 commit+emit，零重启热更新）。
+ * 解法对齐 plugin-registry 的薄控制台（settings.section + 自建 /api 路由）。
  *
  * 依赖纪律（client bundle purity）：
  *  - require 只允许平台静态词（react / react/jsx-runtime /
- *    @deepseek-ai/dsh-client-ui-slots / @deepseek-ai/dsh-client-ui-primitives）；
- *  - 跨包协作走 cordis 服务注入（slots / locale / settingsScope），不 import
- *    任何 @deepseek-ai 官方 client 包（client-modules 禁止跨插件值 import）；
- *  - 表单状态机自实现（官方 CardForm 在 dsh-client-ui-settings-plugins 包内，
- *    不可 import）——对齐其语义：staged draft、save 单点写入、空文本=清除、
- *    overridden 以 user 层 presence 判定。
+ *    @deepseek-ai/dsh-client-ui-primitives / @deepseek-ai/dsh-client-ui-slots）；
+ *  - 跨包协作走 cordis 服务注入（slots / locale），不 import 任何
+ *    @deepseek-ai 官方 client 包（client-modules 禁止跨插件值 import）；
+ *  - 表单状态机自实现（staged draft、save 单点写入、空文本=清除、overridden
+ *    以 user 层 presence 判定），对齐官方 CardForm 语义但因走自建路由，
+ *    resolved/user 两层均来自 GET 响应而非 settingsScope wire 快照。
  *
  * 本文件即产物（CJS + __ModuleLoader__.load 包装，零构建链，git 源一行安装）；
- * 决策见 decisions/implemented/2026-08-14-vision-settings-ui-card.md。
+ * 决策见 decisions/implemented/2026-08-15-vision-settings-section-page.md。
  */
 
 window.__ModuleLoader__.load({
@@ -48,6 +53,8 @@ window.__ModuleLoader__.load({
       saving: 'Saving…',
       discard: 'Discard',
       saveFailed: 'Save failed',
+      loading: 'Loading…',
+      loadFailed: 'Failed to load settings',
     }
 
     const zh = {
@@ -65,30 +72,35 @@ window.__ModuleLoader__.load({
       saving: '保存中…',
       discard: '丢弃',
       saveFailed: '保存失败',
+      loading: '加载中…',
+      loadFailed: '读取设置失败',
     }
 
     /* --------------------------- 表单状态机 --------------------------- */
 
     /** 内部标记：该字段将清除（re-inherit composition layer）。 */
     const CLEAR = '\u0000clear'
+    const FIELDS = ['visionProvider', 'visionModel', 'visionPrompt']
 
     function isRecord(value) {
       return typeof value === 'object' && value !== null && !Array.isArray(value)
     }
 
     /**
-     * dsh-rider 卡片表单：对齐官方 CardForm 语义的 staged 状态机——
-     * 草稿与 settings scope 分离，save 是唯一写入点；空草稿/清除 = unset。
+     * dsh-rider 设置页表单：对齐官方 CardForm 语义的 staged 状态机——
+     * 草稿与已读快照分离，save 是唯一写入点；空草稿/清除 = unset。
+     * 数据经 fetch 自建路由读写（resolved/user 两层来自 GET 响应）。
      */
     class RiderVisionCardController {
-      constructor(scope) {
-        this.scope = scope
+      constructor() {
         this.drafts = {}
         this.saving = false
         this.failed = false
+        this.loading = true
+        this.loadFailed = false
+        this.resolved = {}
+        this.user = {}
         this.listeners = new Set()
-        this.snapshot = null
-        scope.subscribe(() => this.publish())
         this.store = {
           getSnapshot: () => this.projection(),
           subscribe: (listener) => {
@@ -96,50 +108,86 @@ window.__ModuleLoader__.load({
             return () => this.listeners.delete(listener)
           },
         }
+        void this.refresh()
       }
 
       /** 一个字段的控件状态：草稿文本、保存后是否覆盖、是否非法（文本字段恒合法）。 */
-      fieldState(field, snap, user) {
+      fieldState(field) {
         const draft = this.drafts[field]
         const hasDraft = draft !== undefined
-        const stored = isRecord(snap.value) ? snap.value[field] : undefined
-        const text = hasDraft ? (draft === CLEAR ? '' : draft) : String(stored ?? '')
-        const overridden = hasDraft ? draft !== CLEAR && draft !== '' : field in user
+        const resolvedText = String(this.resolved[field] ?? '')
+        const text = hasDraft ? (draft === CLEAR ? '' : draft) : resolvedText
+        const overridden = hasDraft ? draft !== CLEAR && draft !== '' : field in this.user
         return { text, overridden, invalid: false }
       }
 
       projection() {
-        const snap = this.scope.getSnapshot()
-        const user = isRecord(snap.user) ? snap.user : {}
-        const available = snap.status !== 'unavailable'
         return {
-          available,
-          writable: snap.writable === true && available,
+          loading: this.loading,
+          loadFailed: this.loadFailed,
           dirty: Object.keys(this.drafts).length > 0,
           invalid: false,
           saving: this.saving,
           failed: this.failed,
-          visionProvider: this.fieldState('visionProvider', snap, user),
-          visionModel: this.fieldState('visionModel', snap, user),
-          visionPrompt: this.fieldState('visionPrompt', snap, user),
+          visionProvider: this.fieldState('visionProvider'),
+          visionModel: this.fieldState('visionModel'),
+          visionPrompt: this.fieldState('visionPrompt'),
         }
       }
 
       publish() {
-        this.snapshot = this.projection()
         for (const listener of [...this.listeners]) listener()
       }
 
+      /** GET /api/dsh-rider-vision 刷新 resolved + user 两层。 */
+      async refresh() {
+        this.loading = true
+        this.loadFailed = false
+        this.publish()
+        try {
+          const response = await fetch('/api/dsh-rider-vision', { headers: { accept: 'application/json' } })
+          const body = await response.json()
+          if (body?.ok !== true) throw new Error(body?.message ?? 'load failed')
+          this.resolved = isRecord(body.resolved) ? body.resolved : {}
+          this.user = isRecord(body.user) ? body.user : {}
+        } catch {
+          this.loadFailed = true
+        }
+        this.loading = false
+        this.publish()
+      }
+
+      /** POST /api/dsh-rider-vision：草稿按字段转 update patch / reset。 */
       async save() {
         if (this.saving) return
         this.saving = true
         this.failed = false
         this.publish()
         try {
-          for (const [field, draft] of Object.entries(this.drafts)) {
-            if (draft === CLEAR || draft === '') await this.scope.unset(field)
-            else await this.scope.set(field, draft)
+          const patch = {}
+          let allClear = true
+          for (const field of FIELDS) {
+            const draft = this.drafts[field]
+            if (draft === undefined) continue
+            if (draft === CLEAR || draft === '') {
+              patch[field] = ''
+            } else {
+              patch[field] = draft
+              allClear = false
+            }
           }
+          // 全字段清除等价 replace({})——确保 user 层彻底重置回 base/默认。
+          const hasEveryField = FIELDS.every((f) => Object.prototype.hasOwnProperty.call(this.drafts, f))
+          const body = (allClear && hasEveryField) ? { reset: true } : { update: patch }
+          const response = await fetch('/api/dsh-rider-vision', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          const result = await response.json()
+          if (result?.ok !== true) throw new Error(result?.message ?? 'save failed')
+          this.resolved = isRecord(result.resolved) ? result.resolved : {}
+          this.user = isRecord(result.user) ? result.user : {}
           this.drafts = {}
         } catch {
           this.failed = true
@@ -159,11 +207,14 @@ window.__ModuleLoader__.load({
             this.publish()
           },
           save: () => {
-            this.save()
+            void this.save()
           },
           discard: () => {
             this.drafts = {}
             this.publish()
+          },
+          retry: () => {
+            void this.refresh()
           },
         }
       }
@@ -175,29 +226,36 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------ 卡片 ------------------------------ */
 
-    const cardStyle = {
-      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
-      borderRadius: 12,
-      padding: '16px 18px',
+    const pageStyle = {
       display: 'flex',
       flexDirection: 'column',
-      gap: 4,
-      background: 'var(--dsw-alias-bg-module-platform, transparent)',
+      gap: 12,
+      maxWidth: 720,
+      color: 'var(--dsw-alias-label-primary, inherit)',
     }
     const titleStyle = {
       margin: 0,
-      fontSize: 14,
-      fontWeight: 600,
+      fontSize: 16,
+      fontWeight: 500,
+      lineHeight: '24px',
       color: 'var(--dsw-alias-label-primary, inherit)',
-      lineHeight: 1.5,
     }
     const descStyle = {
       margin: '0 0 6px',
-      fontSize: 12,
+      fontSize: 14,
+      lineHeight: '22px',
       color: 'var(--dsw-alias-label-tertiary, inherit)',
-      lineHeight: 1.5,
     }
-    const fieldStyle = { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' }
+    const editorStyle = {
+      borderRadius: 12,
+      background: 'var(--dsw-alias-bg-module-platform, transparent)',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+      padding: '14px 16px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14,
+    }
+    const fieldStyle = { display: 'flex', flexDirection: 'column', gap: 6 }
     const fieldHeadStyle = { display: 'flex', alignItems: 'center', gap: 8 }
     const labelStyle = {
       flex: 1,
@@ -228,6 +286,7 @@ window.__ModuleLoader__.load({
     const inputStyle = { width: '100%', boxSizing: 'border-box' }
     const actionsStyle = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', paddingTop: 4 }
     const errorStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-error, #c0392b)' }
+    const mutedStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, inherit)' }
 
     function fieldRow(t, field, label, hint, state, disabled, props) {
       return React.createElement(
@@ -253,36 +312,49 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function RiderVisionCard(props) {
+    function RiderVisionPage(props) {
       const t = props.t
       const state = props.useRiderVisionCard((snapshot) => snapshot)
-      if (!state.available) return null
-      const disabled = !state.writable
+      if (state.loading) {
+        return React.createElement('div', { style: pageStyle },
+          React.createElement('p', { style: mutedStyle }, t('loading')),
+        )
+      }
+      if (state.loadFailed) {
+        return React.createElement('div', { style: pageStyle },
+          React.createElement('p', { style: errorStyle }, t('loadFailed')),
+          React.createElement(Button, { variant: 'outline', size: 'sm', onClick: props.retry }, t('reset')),
+        )
+      }
+      const disabled = state.saving
       const rows = [
         ['visionProvider', t('visionProvider'), t('visionProviderHint')],
         ['visionModel', t('visionModel'), t('visionModelHint')],
         ['visionPrompt', t('visionPrompt'), t('visionPromptHint')],
       ]
       return React.createElement(
-        'div', { style: cardStyle },
-        React.createElement('h4', { style: titleStyle }, t('title')),
+        'div', { style: pageStyle },
+        React.createElement('h2', { style: titleStyle }, t('title')),
         React.createElement('p', { style: descStyle }, t('description')),
-        rows.map(([field, label, hint]) => fieldRow(t, field, label, hint, state[field], disabled, props)),
-        React.createElement('div', { style: actionsStyle },
-          state.dirty
-            ? React.createElement(Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.discard }, t('discard'))
-            : null,
-          React.createElement(
-            Button,
-            {
-              variant: 'primary',
-              size: 'sm',
-              disabled: disabled || !state.dirty || state.saving,
-              onClick: props.save,
-            },
-            state.saving ? t('saving') : t('save'),
+        React.createElement(
+          'div', { style: editorStyle },
+          rows.map(([field, label, hint]) => fieldRow(t, field, label, hint, state[field], disabled, props)),
+          React.createElement('div', { style: actionsStyle },
+            state.dirty
+              ? React.createElement(Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.discard }, t('discard'))
+              : null,
+            React.createElement(
+              Button,
+              {
+                variant: 'primary',
+                size: 'sm',
+                disabled: disabled || !state.dirty,
+                onClick: props.save,
+              },
+              state.saving ? t('saving') : t('save'),
+            ),
+            state.failed ? React.createElement('p', { style: errorStyle }, t('saveFailed')) : null,
           ),
-          state.failed ? React.createElement('p', { style: errorStyle }, t('saveFailed')) : null,
         ),
       )
     }
@@ -290,21 +362,20 @@ window.__ModuleLoader__.load({
     /* ------------------------------ 挂载 ------------------------------ */
 
     function apply(ctx) {
-      const controller = new RiderVisionCardController(ctx.settingsScope.bind({ namespace: NS }))
-      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-rider: settings card dictionaries')
-      ctx.slots.inject('settings.plugin.item', function* () {
-        yield ctx.slots.register({
-          name: 'settings.plugin.item',
+      const controller = new RiderVisionCardController()
+      ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-rider: settings page dictionaries')
+      ctx.slots.inject('settings.section', () =>
+        ctx.slots.register({
+          name: 'settings.section',
           id: 'dsh-rider',
-          order: 30,
-          locale: NS,
+          order: 50,
+          label: () => 'dsh-rider',
           inject: () => controller.inject(),
-        }, RiderVisionCard)
-      })
+        }, RiderVisionPage))
     }
 
     exports.name = 'dsh-rider'
-    exports.inject = ['slots', 'locale', 'settingsScope']
+    exports.inject = ['slots', 'locale']
     exports.apply = apply
     return module.exports
   },

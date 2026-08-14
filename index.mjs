@@ -25,8 +25,23 @@
  *   - 图片必须经 ctx.attachments.saveImage 入库（adapter 经 readImage 取字节），
  *     校验通过才构造 {type:'image', attachment} 消息块，走 ctx.llm.stream。
  *
- * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md 与
- * decisions/implemented/2026-08-14-vision-preprocessor-tool.md。
+ * 能力三：前置视觉设置页 HTTP 路由 —— `/api/dsh-rider-vision`。
+ *   - 背景：dsh「设置→插件→插件配置」的 settings.plugin.item 卡片只在目标
+ *     settings namespace 被 apiproxy 显式暴露给 Web client 时渲染
+ *     （WEB_SETTINGS_NAMESPACES 硬编码 allowlist，rc.6 尚未把 expose 决策
+ *     下放到 settings.register()，见 dsh-host-apiproxy 注释「deferred work」）。
+ *     dsh-rider 作为第三方插件，其 namespace 不在 allowlist，卡片必然
+ *     return null（available=false）。解法对齐 plugin-registry 的薄控制台：
+ *     client half 改注册顶级 settings.section 设置页（inject 返回空对象，
+ *     零 namespace 门槛），数据通道走 Node half 自建的 HTTP 路由，handler
+ *     在 host 进程内直连 ctx.settings scope 读写（不经 wire，绕开暴露限制；
+ *     register 时 applies:'live'，写即 commit+emit，零重启热更新）。
+ *   - GET 读 dsh-rider 段三个字段的 user 层覆盖值与 resolved 值；
+ *   - POST 写：update 合并 patch（字段置值）/ replace({}) 清空 user 层（重置）。
+ *
+ * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md、
+ * 2026-08-14-vision-preprocessor-tool.md 与
+ * 2026-08-15-vision-settings-section-page.md。
  */
 
 import { execFile } from 'node:child_process'
@@ -43,7 +58,7 @@ const execFileAsync = promisify(execFile)
 
 export const name = 'dsh-rider'
 
-export const inject = ['tools', 'systemPrompt', 'llm', 'attachments', 'settings', 'agentDefaultModel']
+export const inject = ['tools', 'systemPrompt', 'llm', 'attachments', 'settings', 'agentDefaultModel', 'webServer']
 
 const SAFE_SEARCH_MAP = {
   strict: SafeSearchType.STRICT,
@@ -516,5 +531,96 @@ export function apply(ctx) {
       'Use the built-in `web_search` tool only as a final fallback when `duckduckgo_search` fails.',
       '网络搜索优先使用免费的 duckduckgo_search（DuckDuckGo + Bing 后备），内置 web_search 仅作最终后备。',
     ].join('\n'),
+  })
+
+  /* 前置视觉设置页 HTTP 路由（见文件头「能力三」）。client half 的
+   * settings.section 设置页经此 self-built route 读写 dsh-rider 段——
+   * host 进程内直连 ctx.settings scope，不经 apiproxy wire 的 namespace
+   * 暴露限制（第三方插件 namespace 不在 WEB_SETTINGS_NAMESPACES
+   * allowlist），写即 commit+emit（register 时 applies:'live'），零重启。 */
+  if (ctx.webServer !== undefined) {
+    ctx.effect(() => {
+      const stop = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-vision',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          const readUserLayer = () => {
+            const settings = ctx.get('settings')
+            const descriptor = settings?.describe?.()?.find?.((d) => d.ns === VISION_SETTINGS_NS)
+            const user = descriptor?.user
+            return typeof user === 'object' && user !== null ? user : {}
+          }
+          const method = req?.method
+          try {
+            if (method === 'GET') {
+              const stored = visionSettings.get() ?? {}
+              const user = readUserLayer()
+              send(200, {
+                ok: true,
+                resolved: {
+                  visionProvider: stored.visionProvider ?? '',
+                  visionModel: stored.visionModel ?? '',
+                  visionPrompt: stored.visionPrompt ?? '',
+                },
+                user,
+              })
+              return
+            }
+            if (method !== 'POST') {
+              send(405, { ok: false, message: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req)
+            if (body.reset === true) {
+              await visionSettings.replace({})
+            } else {
+              const patch = {}
+              for (const field of ['visionProvider', 'visionModel', 'visionPrompt']) {
+                if (Object.prototype.hasOwnProperty.call(body.update ?? {}, field)) {
+                  const value = body.update[field]
+                  patch[field] = typeof value === 'string' ? value.trim() : ''
+                }
+              }
+              await visionSettings.update(patch)
+            }
+            const stored = visionSettings.get() ?? {}
+            const user = readUserLayer()
+            send(200, {
+              ok: true,
+              resolved: {
+                visionProvider: stored.visionProvider ?? '',
+                visionModel: stored.visionModel ?? '',
+                visionPrompt: stored.visionPrompt ?? '',
+              },
+              user,
+            })
+          } catch (error) {
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
+      return () => stop?.()
+    }, 'dsh-rider: vision settings route')
+  }
+}
+
+/** 读取请求 JSON body（POST），容错非 JSON / 读流出错。 */
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let raw = ''
+    req?.on?.('data', (chunk) => { raw += chunk?.toString?.('utf8') ?? String(chunk) })
+    req?.on?.('end', () => {
+      try {
+        resolve(raw === '' ? {} : JSON.parse(raw))
+      } catch {
+        resolve({})
+      }
+    })
+    req?.on?.('error', () => resolve({}))
   })
 }

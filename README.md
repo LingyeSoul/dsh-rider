@@ -76,9 +76,9 @@ llm-pi-ai:
 
 ## 设置界面配置（推荐）
 
-装包后，dsh「设置 → 插件」（configurable tab）会出现 **dsh-rider — 前置视觉设置**
-卡片：三个字段（视觉提供商 / 视觉模型 / 默认指令），保存即写入 `dsh-rider`
-settings 命名空间（live 生效，无需重启）。等效于手改 `settings.yaml`：
+装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /
+视觉模型 / 默认指令），保存即写入 `dsh-rider` settings 命名空间（live 生效，
+无需重启）。等效于手改 `settings.yaml`：
 
 ```yaml
 dsh-rider:
@@ -86,6 +86,15 @@ dsh-rider:
   visionModel: zai-org/GLM-5.2
   visionPrompt: 请详细描述这张图片的内容
 ```
+
+> **为什么是独立设置页而非「设置→插件→插件配置」卡片**：dsh rc.6 的「插件
+> 配置」tab 只为 settings namespace 被 apiproxy 显式暴露给 Web client 的
+> 插件渲染卡片（`WEB_SETTINGS_NAMESPACES` 硬编码 allowlist，仅含官方宿主插件
+> 如 agent-loop/bash/web-search-deepseek）。第三方插件 namespace 不在
+> allowlist，卡片必然不显示（框架 deferred work，尚未把 expose 决策下放到
+> `settings.register()`）。本插件改走 `settings.section` 独立设置页 + Node half
+> 自建 HTTP 路由（对齐 plugin-registry 的薄控制台模式），绕开暴露限制。详见
+> 决策记录 `decisions/implemented/2026-08-15-vision-settings-section-page.md`。
 
 ## 搜索工具选择（系统提示指引）
 
@@ -180,14 +189,14 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间）；`client/index.js` = client half（设置 → 插件页面的
-  dsh-rider 配置卡片，CJS 源码即产物，零构建链）；搜索实现依赖
-  `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闭包）；视觉能力
-  全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
-  `ctx.agentDefaultModel`，零新增依赖）。
+  settings 命名空间 + `/api/dsh-rider-vision` 配置读写路由）；`client/index.js` =
+  client half（设置导航的 dsh-rider 独立设置页，CJS 源码即产物，零构建链）；
+  搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闭包）；
+  视觉能力全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
+  `ctx.agentDefaultModel` / `ctx.webServer`，零新增依赖）。
 - 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
   stub 做真实 import 与 apply() 注册形状校验；`vision-execute` 门禁用全服务
   fake ctx 跑工具 execute 的成功/失败路径冒烟；`client-bundle`/`client-execute`
-  门禁用 vm 沙箱执行真实 client bundle 并冒烟设置卡片的表单流，均无需
-  node_modules）。
+  门禁用 vm 沙箱执行真实 client bundle（含 fetch stub）并冒烟设置页的表单流
+  （编辑→保存→重置→清除→丢弃），均无需 node_modules）。
 - 决策记录：`decisions/implemented/`。

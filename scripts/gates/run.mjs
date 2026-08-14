@@ -27,7 +27,7 @@ const CATEGORIES = new Set(["feature", "bug-fix", "simplification", "architectur
 const ENTRY_KEYS = new Set(["id", "name", "config", "disabled"]);
 // 本仓库组合层允许的 insert 入口（当前仅自身 Node half；后续能力扩展时追加）。
 const ALLOWED_ENTRY_NAMES = new Set(["dsh-rider"]);
-const ENTRY_INJECT_REQUIRED = ["tools", "systemPrompt", "llm", "attachments", "settings", "agentDefaultModel"];
+const ENTRY_INJECT_REQUIRED = ["tools", "systemPrompt", "llm", "attachments", "settings", "agentDefaultModel", "webServer"];
 const SECTION_MIN_ORDER = 110; // 内置 dsh-tool-web 的 web_search 指引 order，必须在其后
 // 本仓库注册的工具白名单：工具名 → 必填参数（参数级形状在 checkApply 内逐工具校验）。
 const EXPECTED_TOOLS = {
@@ -697,10 +697,41 @@ function makeClientRequireStubs() {
   };
 }
 
-/** 在 vm 沙箱执行 client bundle，返回 factory 产物与 load 记录。 */
-function loadClientBundle(code) {
+/** 自建路由的 fetch stub：模拟 Node half 的 /api/dsh-rider-vision GET/POST。
+ *  返回可控的 resolved/user 两层，POST 时按 update/reset 更新。 */
+function makeVisionFetchStub() {
+  const state = { resolved: { visionProvider: "", visionModel: "", visionPrompt: "" }, user: {}, calls: [] };
+  return {
+    fetch: async (url, opts) => {
+      state.calls.push({ url, method: opts?.method ?? "GET", body: opts?.body });
+      const method = opts?.method ?? "GET";
+      // GET：返回当前 resolved/user 快照。
+      if (method === "GET") {
+        return { ok: true, json: async () => ({ ok: true, resolved: { ...state.resolved }, user: { ...state.user } }) };
+      }
+      // POST：按 body 更新状态，返回新快照。
+      const body = JSON.parse(opts?.body ?? "{}");
+      if (body.reset === true) {
+        state.user = {};
+        state.resolved = { visionProvider: "", visionModel: "", visionPrompt: "" };
+      } else if (body.update && typeof body.update === "object") {
+        for (const [field, value] of Object.entries(body.update)) {
+          if (value === "") delete state.user[field];
+          else state.user[field] = value;
+        }
+        state.resolved = { visionProvider: "", visionModel: "", visionPrompt: "", ...state.user };
+      }
+      return { ok: true, json: async () => ({ ok: true, resolved: { ...state.resolved }, user: { ...state.user } }) };
+    },
+    state,
+  };
+}
+
+/** 在 vm 沙箱执行 client bundle，返回 factory 产物与 load 记录。fetchStub 注入 globalThis。 */
+function loadClientBundle(code, fetchStub) {
   let handoff = null;
   const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, console };
+  if (fetchStub !== undefined) sandbox.fetch = fetchStub;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox, { filename: "client/index.js" });
@@ -709,43 +740,35 @@ function loadClientBundle(code) {
   return handoff.factory(makeClientRequireStubs());
 }
 
-/** 跑 client apply(fakeCtx)，返回注册记录与 fake scope。 */
+/** 跑 client apply(fakeCtx)，返回注册记录。controller 构造时异步 refresh（fetch GET）。 */
 function runClientApply(mod) {
   const localeRegistrations = [];
   const slotRegistrations = [];
   const slotInjections = [];
-  const bindings = [];
-  let user = {};
-  let value = {};
-  const scopeListeners = new Set();
-  const scope = {
-    getSnapshot: () => ({ status: "ready", value, base: {}, user, revision: 1, writable: true, mode: "host" }),
-    subscribe: (listener) => { scopeListeners.add(listener); return () => { scopeListeners.delete(listener); }; },
-    set: async (field, v) => { user = { ...user, [field]: v }; value = { ...value, [field]: v }; for (const l of [...scopeListeners]) l(); },
-    unset: async (field) => {
-      const nextUser = { ...user };
-      delete nextUser[field];
-      user = nextUser;
-      const nextValue = { ...value };
-      delete nextValue[field];
-      value = nextValue;
-      for (const l of [...scopeListeners]) l();
-    },
-  };
   const fakeCtx = {
     effect: (fn) => { fn(); },
     locale: {
       register: (ns, dicts) => { localeRegistrations.push({ ns, dicts }); },
       bind: (ns) => (key) => localeRegistrations.find((r) => r.ns === ns)?.dicts.zh?.[key] ?? key,
     },
-    settingsScope: { bind: (spec) => { bindings.push(spec); return scope; } },
     slots: {
-      inject: (key, callback) => { for (const entry of callback()) slotInjections.push({ key, entry }); },
-      register: (opts, component) => { slotRegistrations.push({ opts, component }); },
+      // 真实 slots.inject 的 callback 可返回单 entry（箭头函数 `() => register(...)`，
+      // 对齐官方 example 与 plugin-registry）或可迭代（generator/array）。fakeCtx 兼容两种。
+      inject: (key, callback) => {
+        const result = callback();
+        const entries = (result != null && typeof result[Symbol.iterator] === "function") ? result : [result];
+        for (const entry of entries) if (entry) slotInjections.push({ key, entry });
+      },
+      register: (opts, component) => { const entry = { opts, component }; slotRegistrations.push(entry); return entry; },
     },
   };
   mod.apply(fakeCtx);
-  return { localeRegistrations, slotRegistrations, slotInjections, bindings, scope };
+  return { localeRegistrations, slotRegistrations, slotInjections };
+}
+
+/** 等待 flush（controller 的异步 refresh/save 完成）。 */
+function flushMicrotasks() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 const clientBundleGate = gate(
@@ -768,68 +791,72 @@ const clientExecuteGate = gate(
   "client-execute",
   async () => {
     const problems = [];
+    const stub = makeVisionFetchStub();
     let mod;
     try {
-      mod = loadClientBundle(readFileSync(CLIENT_PATH, "utf8"));
+      mod = loadClientBundle(readFileSync(CLIENT_PATH, "utf8"), stub.fetch);
     } catch (error) {
       return [`client bundle 执行失败：${error.message}`];
     }
     if (mod.name !== "dsh-rider") problems.push(`client 导出 name 不符：${mod.name}`);
-    if (!Array.isArray(mod.inject) || !["slots", "locale", "settingsScope"].every((s) => mod.inject.includes(s))) {
-      problems.push(`client inject 未声明全部服务（slots/locale/settingsScope）：${JSON.stringify(mod.inject)}`);
+    if (!Array.isArray(mod.inject) || !["slots", "locale"].every((s) => mod.inject.includes(s))) {
+      problems.push(`client inject 未声明全部服务（slots/locale）：${JSON.stringify(mod.inject)}`);
     }
+    if (mod.inject.includes("settingsScope")) problems.push("client inject 不应再声明 settingsScope（已改自建路由）");
     if (typeof mod.apply !== "function") return [...problems, "client 未导出 apply"];
-    const { localeRegistrations, slotRegistrations, slotInjections, bindings } = runClientApply(mod);
-    if (bindings.length !== 1 || bindings[0].namespace !== "dsh-rider") {
-      problems.push(`settingsScope.bind 未绑定 dsh-rider 命名空间：${JSON.stringify(bindings)}`);
-    }
+    const { localeRegistrations, slotRegistrations, slotInjections } = runClientApply(mod);
+    // controller 构造时异步 refresh（fetch GET），flush 后 loading 应回 false。
+    await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
-    const card = slotRegistrations.find((r) => r.opts?.name === "settings.plugin.item" && r.opts?.id === "dsh-rider");
-    if (!card) {
-      problems.push("未注册 settings.plugin.item / dsh-rider 卡片");
+    const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
+    if (!page) {
+      problems.push("未注册 settings.section / dsh-rider 设置页");
     } else {
-      if (card.opts.locale !== "dsh-rider") problems.push("卡片 locale 未声明 dsh-rider 字典");
-      const face = card.opts.inject();
+      const face = page.opts.inject();
       const store = face.hooks?.riderVisionCard;
       if (!store || typeof store.getSnapshot !== "function" || typeof store.subscribe !== "function") {
-        problems.push("卡片 inject 缺 hooks.riderVisionCard（getSnapshot/subscribe）");
+        problems.push("设置页 inject 缺 hooks.riderVisionCard（getSnapshot/subscribe）");
       } else {
         const initial = store.getSnapshot();
-        if (initial.available !== true || initial.writable !== true) problems.push(`卡片初始状态异常：${JSON.stringify(initial)}`);
-        if (initial.visionModel?.text !== "" || initial.visionProvider?.text !== "") problems.push("卡片初始字段文本应为空");
+        if (initial.loading === true) problems.push(`设置页初始 loading 应为 false（fetch 后）：${JSON.stringify(initial)}`);
+        if (initial.loadFailed === true) problems.push(`设置页初始 loadFailed 应为 false：${JSON.stringify(initial)}`);
+        if (initial.visionModel?.text !== "" || initial.visionProvider?.text !== "") problems.push("设置页初始字段文本应为空");
+        if (initial.dirty !== false) problems.push("设置页初始 dirty 应为 false");
         // 编辑 → 保存
         face.edit("visionModel", "gpt-4o");
         const staged = store.getSnapshot();
         if (staged.visionModel?.text !== "gpt-4o" || staged.visionModel?.overridden !== true || staged.dirty !== true) {
-          problems.push(`编辑后卡片状态异常：${JSON.stringify(staged)}`);
+          problems.push(`编辑后设置页状态异常：${JSON.stringify(staged)}`);
         }
-        // 用真实 scope 引用跑保存（runClientApply 的 scope 闭包在 fakeCtx 内，此处通过 inject 面无法直接拿 scope；
-        // 保存断言放到下面用 runClientApply 返回的 scope 检查）——save 是异步，await 后读 store。
         await face.save();
+        await flushMicrotasks();
         const saved = store.getSnapshot();
         if (saved.visionModel?.text !== "gpt-4o" || saved.visionModel?.overridden !== true) {
-          problems.push(`保存后卡片状态异常：${JSON.stringify(saved)}`);
+          problems.push(`保存后设置页状态异常：${JSON.stringify(saved)}`);
         }
+        const postCall = stub.state.calls.find((c) => c.method === "POST");
+        if (!postCall) problems.push("保存未发起 POST 请求");
         // 清除（重置）→ 保存
         face.resetField("visionModel");
         if (store.getSnapshot().visionModel?.text !== "") problems.push("重置后草稿文本应为空");
         await face.save();
+        await flushMicrotasks();
         const cleared = store.getSnapshot();
         if (cleared.visionModel?.text !== "" || cleared.visionModel?.overridden !== false) {
-          problems.push(`清除保存后卡片状态异常：${JSON.stringify(cleared)}`);
+          problems.push(`清除保存后设置页状态异常：${JSON.stringify(cleared)}`);
         }
         // 丢弃
         face.edit("visionProvider", "openai");
         face.discard();
         const discarded = store.getSnapshot();
-        if (discarded.dirty !== false || discarded.visionProvider?.text !== "") problems.push(`丢弃后卡片状态异常：${JSON.stringify(discarded)}`);
+        if (discarded.dirty !== false || discarded.visionProvider?.text !== "") problems.push(`丢弃后设置页状态异常：${JSON.stringify(discarded)}`);
       }
-      if (slotInjections.length !== 1 || slotInjections[0].key !== "settings.plugin.item") {
-        problems.push(`slots.inject 未挂到 settings.plugin.item：${JSON.stringify(slotInjections)}`);
+      if (slotInjections.length !== 1 || slotInjections[0].key !== "settings.section") {
+        problems.push(`slots.inject 未挂到 settings.section：${JSON.stringify(slotInjections)}`);
       }
     }
     return problems;
