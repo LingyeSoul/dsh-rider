@@ -27,8 +27,12 @@
  *   - 模型选择：工具参数 provider/model 显式指定 > `dsh-rider` settings 命名
  *     空间（visionProvider/visionModel）> 自动发现（遍历 ctx.llm 已注册提供商
  *     的模型，取第一个声明 inputModalities 含 image 的）。
- *   - 显式指定（参数或 settings）信任用户、跳过 inputModalities 过滤——已配置
- *     但未声明 image 模态的视觉模型（如 siliconflow 的 GLM 系）仍可用。
+ *   - 显式指定（参数或 settings）只跳过 dsh-rider 自己的自动发现模态过滤，**绕不过**
+ *     pi-ai provider 在 ctx.llm.stream 内部的强制校验（dsh-llm-pi-ai/lib/index.js:827:
+ *     `containsImage && !model.input.includes("image")` 抛 UNSUPPORTED_CONTENT）。pi-ai
+ *     手写 provider 的 models 条目若没写 `input`，会回落到 route defaultInput（默认
+ *     ["text"]）→ 视觉调用必失败。解法见「能力四」declare 路由，dsh-rider 帮用户给
+ *     visionModel 补 `input:[text,image]` 声明（dsh 面板不暴露 input 字段）。
  *   - 图片必须经 ctx.attachments.saveImage 入库（adapter 经 readImage 取字节），
  *     校验通过才构造 {type:'image', attachment} 消息块，走 ctx.llm.stream。
  *
@@ -54,8 +58,9 @@
  *     'close'（后者在请求体读完即触发，会把进行中的视觉调用误判为取消 → 499）。
  *
  * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md、
- * 2026-08-14-vision-preprocessor-tool.md 与
- * 2026-08-15-vision-settings-section-page.md。
+ * 2026-08-14-vision-preprocessor-tool.md、
+ * 2026-08-15-vision-settings-section-page.md 与
+ * 2026-08-15-image-modality-declare-route.md。
  */
 
 import { execFile } from 'node:child_process'
@@ -625,6 +630,119 @@ export function apply(ctx) {
        * 的图片准入拦截不触发），handler 在 host 进程内复用 vision_understand 的
        * resolveImageSource/resolveVisionModel/runVisionCall，直接走 ctx.llm.stream
        * 调视觉模型，返回文字描述。这是纯文本会话模型下"粘贴图片看图"的正解。 */
+      /* 图片模态声明路由：'/api/dsh-rider-vision/declare'。
+       * 背景：pi-ai 手写 provider 的 models 条目若没写 `input`，会回落到 route 的
+       * `defaultInput`（默认 ["text"]），导致 pi-ai stream 内 `model.input.includes("image")`
+       * 校验失败 → UNSUPPORTED_CONTENT（dsh 面板不暴露 input 字段，第三方无法在 UI 配）。
+       * dsh-rider 的"信任用户跳过模态过滤"只绕过自己的自动发现，绕不过 pi-ai provider
+       * 在 ctx.llm.stream 内部的强制校验（dsh-llm-pi-ai/lib/index.js:827）。
+       * 解法：经 DSH 官方 `ctx.settings.mutate('llm-pi-ai', pathOps)` API 给 visionModel
+       * 对应的 models 条目补 `input: [text, image]` 声明——与 dsh 设置编辑器改 models
+       * 列表同策略（models 是整体替换的数组，path op 不支持改数组内部元素，故 set 整个
+       * providers.<route> 路径）。apply:'restart'，改完需重启 web 生效。
+       * GET：读 llm-pi-ai resolved section，返回各 provider 的 models 与 visionModel 的
+       *   当前 input 声明状态（declared: true/false）。
+       * POST {provider, model?}：若 model 缺省用 dsh-rider visionModel；给该模型条目
+       *   set input:[text,image]（若已有则幂等返回）；整体 set providers.<route> 回写。
+       * POST {provider, model?, remove:true}：删该模型条目的 input 字段（回退默认）。
+       */
+      const stopDeclare = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-vision/declare',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          try {
+            const settings = ctx.get('settings')
+            const LLM_PI_AI_NS = 'llm-pi-ai'
+            /** 读 llm-pi-ai namespace 的 resolved section（providers 路径）。 */
+            const readPiAiProviders = () => {
+              const descriptor = settings?.describe?.()?.find?.((d) => d.ns === LLM_PI_AI_NS)
+              // resolved value 在 descriptor.value（schema 默认 + base + user 分层合并），
+              // user 层在 descriptor.user（仅用户写入的覆盖）。改写必须基于 resolved，
+              // 否则 set 会丢失 base/composition 层的其它 provider。
+              const resolved = typeof descriptor?.value === 'object' && descriptor.value !== null
+                ? descriptor.value
+                : {}
+              return typeof resolved.providers === 'object' && resolved.providers !== null
+                ? resolved.providers
+                : {}
+            }
+            /** 找 models 数组里 id 匹配的条目索引；返回 {index, entry} 或 undefined。 */
+            const findModel = (providers, route, modelId) => {
+              const routeProfile = providers?.[route]
+              const models = Array.isArray(routeProfile?.models) ? routeProfile.models : []
+              // entry.input 可能来自该条目或 base/catalog；这里只看条目自身写的 input。
+              const index = models.findIndex((m) => m && m.id === modelId)
+              return index >= 0 ? { index, entry: models[index], models } : undefined
+            }
+            /** 列出所有 provider×model 的 input 声明状态。 */
+            const survey = (providers) => {
+              const out = []
+              for (const [route, profile] of Object.entries(providers ?? {})) {
+                const models = Array.isArray(profile?.models) ? profile.models : []
+                for (const model of models) {
+                  if (!model || typeof model.id !== 'string') continue
+                  out.push({
+                    provider: route,
+                    model: model.id,
+                    input: Array.isArray(model.input) ? model.input : undefined,
+                    declared: Array.isArray(model.input) && model.input.includes('image'),
+                  })
+                }
+              }
+              return out
+            }
+
+            if (req?.method === 'GET') {
+              const providers = readPiAiProviders()
+              const stored = visionSettings.get() ?? {}
+              const visionModel = stored.visionModel ?? ''
+              const visionProvider = stored.visionProvider ?? ''
+              send(200, { ok: true, models: survey(providers), visionProvider, visionModel })
+              return
+            }
+            if (req?.method !== 'POST') {
+              send(405, { ok: false, message: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req)
+            const route = typeof body.provider === 'string' ? body.provider.trim() : ''
+            let modelId = typeof body.model === 'string' && body.model.trim() !== ''
+              ? body.model.trim()
+              : (visionSettings.get()?.visionModel ?? '').trim()
+            if (route === '' || modelId === '') {
+              send(400, { ok: false, message: 'provider 与 model 不能为空（model 缺省时取 dsh-rider visionModel）' })
+              return
+            }
+            const remove = body.remove === true
+            const providers = readPiAiProviders()
+            const found = findModel(providers, route, modelId)
+            if (found === undefined) {
+              send(404, { ok: false, message: `provider「${route}」的 models 列表中未找到 model「${modelId}」` })
+              return
+            }
+            // deepcopy route profile，改对应 model 条目的 input，再 mutate set 整个 route。
+            const routeClone = JSON.parse(JSON.stringify(providers[route] ?? {}))
+            if (!Array.isArray(routeClone.models)) routeClone.models = []
+            const target = routeClone.models[found.index]
+            if (remove) {
+              delete target.input
+            } else {
+              target.input = ['text', 'image']
+            }
+            await settings.mutate(LLM_PI_AI_NS, [
+              { op: 'set', path: ['providers', route], value: routeClone },
+            ])
+            send(200, { ok: true, provider: route, model: modelId, removed: remove, input: remove ? undefined : ['text', 'image'], restartRequired: true })
+          } catch (error) {
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
       const stopUnderstand = ctx.webServer.register({
         kind: 'exact',
         path: '/api/dsh-rider-vision/understand',
@@ -672,8 +790,8 @@ export function apply(ctx) {
           }
         },
       })
-      return () => { stop?.(); stopUnderstand?.() }
-    }, 'dsh-rider: vision settings + understand routes')
+      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.() }
+    }, 'dsh-rider: vision settings + understand + declare routes')
   }
 }
 

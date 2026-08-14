@@ -121,6 +121,26 @@ DSH 对纯文本会话模型的图片准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAG
 
 > 技术细节见决策记录 `decisions/implemented/2026-08-15-composer-paste-vision-dock.md`。
 
+## 为视觉模型补图片模态声明（pi-ai 手写 provider）
+
+dsh 的 pi-ai provider 在 `ctx.llm.stream` 内部强制校验模型的 `input` 模态——
+手写 provider（如 siliconflow）的 `models` 条目若没写 `input`，会回落到纯文本，
+视觉调用必以 `UNSUPPORTED_CONTENT` 失败（`pi-ai model "..." does not support
+image input`）。dsh 设置面板不暴露 `input` 字段，用户无法在 UI 配。
+
+dsh-rider 设置页提供「为视觉模型补图片模态声明」卡片：打开 **设置 → dsh-rider**
+→ 该卡片显示了当前 `visionModel` 的声明状态，点「声明图片输入」即可经 DSH 官方
+`ctx.settings.mutate` API 给该模型条目写 `input: [text, image]`。**改完需重启
+dsh web 生效**（pi-ai 路由是注册级事实）。
+
+- 建议对确认支持图片的模型声明（如 Kimi-K2.7-Code）。若模型本身不支持图片，声明后
+  pi-ai 校验放行、但上游会返回真实错误。
+- 声明后对话流原生粘贴也放行（apiproxy 的 `admit()` 同样查 `inputModalities`）——
+  会话模型支持图片时，可直接在对话里粘贴图片附件，无需 dsh-rider 的 dock（可在
+  设置页关闭「对话粘贴捕获」）。
+
+> 技术细节见决策记录 `decisions/implemented/2026-08-15-image-modality-declare-route.md`。
+
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /

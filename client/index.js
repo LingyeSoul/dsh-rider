@@ -16,7 +16,7 @@
  * 订阅模块级 controller 单例的 store，文案 t 为模块级函数，零 props 依赖。
  *
  * 依赖纪律（client bundle purity）：
- *  - require 只允许平台静态词（react / @deepseek-ai/dsh-client-ui-primitives）；
+ *  - require 只允许平台静态词（react / react-dom / @deepseek-ai/dsh-client-ui-primitives）；
  *  - 跨包协作走 cordis 服务注入（slots / locale），不 import 任何
  *    @deepseek-ai 官方 client 包（client-modules 禁止跨插件值 import）；
  *  - 表单状态机自实现（staged draft、save 单点写入、空文本=清除、overridden
@@ -79,6 +79,19 @@ window.__ModuleLoader__.load({
       composerCaptureHint: 'When on, pasting or dropping an image into the composer sends it straight to the vision model and shows the description above the input (the image is NOT attached to the message — bypassing DSH\'s image gate on text-only models). Useful for text-only models; turn off to use native paste-to-attach on image-capable models.',
       composerTitle: 'Pasted image \u2192 vision',
       composerFailed: 'Vision call failed',
+      declareTitle: 'Declare image modality for the vision model',
+      declareDesc: 'pi-ai hand-written provider models that omit `input` fall back to text-only, so vision calls fail with UNSUPPORTED_CONTENT (the dsh settings panel does not expose this field). This writes `input: [text, image]` onto the vision model\'s entry via the official ctx.settings.mutate API — takes effect after restarting dsh web.',
+      declareModelLabel: 'Target model',
+      declareStatus: 'Current status',
+      declareDeclared: 'image modality declared \u2713',
+      declareNotDeclared: 'not declared (text-only fallback)',
+      declareBtn: 'Declare image input',
+      declareRemoveBtn: 'Remove declaration',
+      declareDoing: 'Writing\u2026',
+      declareDone: 'Declared \u2014 restart dsh web to take effect',
+      declareRemoved: 'Removed \u2014 restart dsh web to take effect',
+      declareFailed: 'Failed',
+      declareNoVisionModel: 'Set visionProvider/visionModel above first',
     }
 
     const zh = {
@@ -114,6 +127,19 @@ window.__ModuleLoader__.load({
       composerCaptureHint: '开启后，在对话输入框粘贴或拖入图片时，dsh-rider 会直接把图片发给视觉模型并在输入框上方显示描述（图片不会作为消息附件发送，绕开 DSH 对纯文本模型的图片拦截）。纯文本会话模型适用；若会话模型支持图片且想用原生粘贴附件，请关闭此项。',
       composerTitle: '粘贴图片 \u2192 视觉理解',
       composerFailed: '视觉理解失败',
+      declareTitle: '为视觉模型补图片模态声明',
+      declareDesc: 'pi-ai 手写 provider 的 models 条目若没写 input，会回落到纯文本，视觉调用会以 UNSUPPORTED_CONTENT 失败（dsh 设置面板不暴露此字段）。本卡片经官方 ctx.settings.mutate API 给视觉模型的条目写 input:[text,image]——改完需重启 dsh web 生效。',
+      declareModelLabel: '目标模型',
+      declareStatus: '当前状态',
+      declareDeclared: '已声明图片模态 \u2713',
+      declareNotDeclared: '未声明（回落纯文本）',
+      declareBtn: '声明图片输入',
+      declareRemoveBtn: '移除声明',
+      declareDoing: '写入中…',
+      declareDone: '已声明——重启 dsh web 生效',
+      declareRemoved: '已移除——重启 dsh web 生效',
+      declareFailed: '失败',
+      declareNoVisionModel: '请先在上方填写 visionProvider/visionModel',
     }
 
     /** 模块级文案函数：优先跟随 ctx.locale 绑定，回退中文字典。apply 时增强。 */
@@ -392,11 +418,11 @@ window.__ModuleLoader__.load({
      * 的开关与 dock 组件共享（dock 在事件发生时读 getEnabled()，设置页订阅刷新）。
      * 不走 Node half settings 命名空间——纯客户端偏好，零重启、零路由。
      */
-    const composerVisionState = { enabled: true, listeners: new Set() }
+    const composerVisionState = { enabled: false, listeners: new Set() }
     try {
-      if (localStorage.getItem('dsh-rider.composerVision') === 'off') composerVisionState.enabled = false
+      if (localStorage.getItem('dsh-rider.composerVision') === 'on') composerVisionState.enabled = true
     } catch {
-      // vm 沙箱 / 无 localStorage 环境：保持默认开
+      // vm 沙箱 / 无 localStorage 环境：保持默认关
     }
     const composerVisionStore = {
       getEnabled: () => composerVisionState.enabled,
@@ -642,6 +668,85 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「为视觉模型补图片模态声明」卡片：读 GET /declare 列出所有 provider×model 的
+     * input 声明状态 + 当前 visionModel 高亮；POST /declare 给 visionModel 条目写
+     * input:[text,image]（或 remove:true 删除）。经 DSH 官方 ctx.settings.mutate API
+     * 同层落盘（host 进程内直连 llm-pi-ai namespace），apply:'restart'，改完提示重启。
+     * 不接 props，自包含（订阅 controller 拿 visionProvider/visionModel）。组件渲染
+     * 时刷新 survey；写入后本地乐观更新 declared 状态（重启前 survey 仍反映旧值，但
+     * UI 用返回值标注「已声明」+ 重启提示）。
+     */
+    function DeclareImageCard() {
+      const [survey, setSurvey] = useState([])
+      const [visionProvider, setVisionProvider] = useState('')
+      const [visionModel, setVisionModel] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [result, setResult] = useState(null) // {declared, removed} | null
+      const [error, setError] = useState(null)
+
+      const refresh = async () => {
+        try {
+          const r = await fetch('/api/dsh-rider-vision/declare', { headers: { accept: 'application/json' } })
+          const body = await r.json()
+          if (body && body.ok === true) {
+            setSurvey(Array.isArray(body.models) ? body.models : [])
+            setVisionProvider(body.visionProvider || '')
+            setVisionModel(body.visionModel || '')
+          }
+        } catch {
+          // 静默：survey 保持空
+        }
+      }
+      useEffect(() => { void refresh() }, [])
+
+      const target = survey.find((m) => m.provider === visionProvider && m.model === visionModel)
+      const declared = result ? result.declared : (target ? target.declared : false)
+
+      const onDeclare = async (remove) => {
+        if (busy) return
+        if (!visionProvider || !visionModel) { setError(t('declareNoVisionModel')); return }
+        setBusy(true); setError(null); setResult(null)
+        try {
+          const r = await fetch('/api/dsh-rider-vision/declare', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ provider: visionProvider, model: visionModel, remove: remove === true }),
+          })
+          const body = await r.json()
+          if (!body || body.ok !== true) throw new Error((body && body.message) || 'declare failed')
+          setResult({ declared: !remove, removed: remove === true })
+          void refresh()
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+        setBusy(false)
+      }
+
+      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
+        h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0 }) }, t('declareTitle')),
+        h('p', { style: descStyle }, t('declareDesc')),
+        h('div', { style: fieldStyle },
+          h('div', { style: fieldHeadStyle },
+            h('label', { style: labelStyle }, t('declareModelLabel')),
+            h('span', { style: badgeStyle }, visionProvider && visionModel ? visionProvider + ' / ' + visionModel : t('declareNoVisionModel')),
+          ),
+          h('p', { style: hintStyle },
+            t('declareStatus') + '\uff1a' +
+            (declared ? t('declareDeclared') : t('declareNotDeclared')),
+          ),
+        ),
+        h('div', { style: actionsStyle },
+          declared
+            ? h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => onDeclare(true) }, busy ? t('declareDoing') : t('declareRemoveBtn'))
+            : h(Button, { variant: 'primary', size: 'sm', disabled: busy || !visionProvider || !visionModel, onClick: () => onDeclare(false) }, busy ? t('declareDoing') : t('declareBtn')),
+        ),
+        result && result.declared ? h('p', { style: mutedStyle }, t('declareDone')) : null,
+        result && result.removed ? h('p', { style: mutedStyle }, t('declareRemoved')) : null,
+        error ? h('p', { style: errorStyle }, t('declareFailed') + '\uff1a' + error) : null,
+      )
+    }
+
+    /**
      * 设置页内「对话粘贴捕获」开关：勾选即写 localStorage（默认开）。订阅
      * composerVisionStore 刷新勾选态。dsh-ads 式自包含——不接 props，零 namespace 门槛。
      */
@@ -872,6 +977,8 @@ window.__ModuleLoader__.load({
             state.failed ? h('p', { style: errorStyle }, t('saveFailed')) : null,
           ),
         ),
+        // 为视觉模型补图片模态声明（pi-ai 手写 provider 的 input 字段补丁）
+        h(DeclareImageCard),
         // 对话粘贴捕获开关（写 localStorage；dock 组件读同一 store）
         h(ComposerCaptureToggleCard),
         // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）

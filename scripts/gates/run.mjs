@@ -716,6 +716,12 @@ function makeVisionFetchStub() {
       if (typeof url === "string" && url.includes("/understand")) {
         return { ok: true, json: async () => ({ ok: true, provider: "stub", model: "stub-vision", text: "(stub) a test image", note: undefined }) };
       }
+      // 模态声明路由：GET 返回空 survey（无 llm-pi-ai 模型），POST 返回成功。
+      if (typeof url === "string" && url.includes("/declare")) {
+        if (method === "GET") return { ok: true, json: async () => ({ ok: true, models: [], visionProvider: "", visionModel: "" }) };
+        const decBody = JSON.parse(opts?.body ?? "{}");
+        return { ok: true, json: async () => ({ ok: true, provider: decBody.provider || "stub", model: decBody.model || "stub", removed: decBody.remove === true, input: decBody.remove === true ? undefined : ["text", "image"], restartRequired: true }) };
+      }
       // GET：返回当前 resolved/user 快照。
       if (method === "GET") {
         return { ok: true, json: async () => ({ ok: true, resolved: { ...state.resolved }, user: { ...state.user } }) };
@@ -820,7 +826,7 @@ const clientExecuteGate = gate(
     await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
     const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
