@@ -74,6 +74,19 @@ llm-pi-ai:
 返回结构：`{ provider, model, text, reasoning?, note?, image: {mediaType, width, height, bytes} }`；
 `note` 在会话模型已支持视觉时给出提示（不阻断）。
 
+## 设置界面配置（推荐）
+
+装包后，dsh「设置 → 插件」（configurable tab）会出现 **dsh-rider — 前置视觉设置**
+卡片：三个字段（视觉提供商 / 视觉模型 / 默认指令），保存即写入 `dsh-rider`
+settings 命名空间（live 生效，无需重启）。等效于手改 `settings.yaml`：
+
+```yaml
+dsh-rider:
+  visionProvider: siliconflow
+  visionModel: zai-org/GLM-5.2
+  visionPrompt: 请详细描述这张图片的内容
+```
+
 ## 搜索工具选择（系统提示指引）
 
 内置 `web_search`（deepseek 网页搜索）会在系统提示中指示 agent 使用它。本插件
@@ -167,10 +180,14 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间）；搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，
-  随包安装进 profile 闭包）；视觉能力全部走官方服务（`ctx.llm` /
-  `ctx.attachments` / `ctx.settings` / `ctx.agentDefaultModel`，零新增依赖）。
+  settings 命名空间）；`client/index.js` = client half（设置 → 插件页面的
+  dsh-rider 配置卡片，CJS 源码即产物，零构建链）；搜索实现依赖
+  `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闭包）；视觉能力
+  全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
+  `ctx.agentDefaultModel`，零新增依赖）。
 - 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
   stub 做真实 import 与 apply() 注册形状校验；`vision-execute` 门禁用全服务
-  fake ctx 跑工具 execute 的成功/失败路径冒烟，均无需 node_modules）。
+  fake ctx 跑工具 execute 的成功/失败路径冒烟；`client-bundle`/`client-execute`
+  门禁用 vm 沙箱执行真实 client bundle 并冒烟设置卡片的表单流，均无需
+  node_modules）。
 - 决策记录：`decisions/implemented/`。

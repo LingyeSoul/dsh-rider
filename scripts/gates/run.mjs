@@ -20,6 +20,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const CATEGORIES = new Set(["feature", "bug-fix", "simplification", "architecture", "process", "testing"]);
@@ -383,6 +384,11 @@ const packageJsonGate = gate(
     const patch = pkg.dsh?.bundle?.patch;
     if (typeof patch !== "string") problems.push("package.json#dsh.bundle.patch 缺失或非字符串（bundle 声明）");
     else if (!existsSync(join(ROOT, patch))) problems.push(`dsh.bundle.patch 指向的文件不存在：${patch}`);
+    if (typeof pkg.dsh?.client?.platform !== "string" || pkg.dsh.client.platform === "") {
+      problems.push("package.json#dsh.client.platform 缺失或非字符串（client bundle 声明）");
+    }
+    if (typeof pkg.exports?.["./client"] !== "string") problems.push("package.json#exports[\"./client\"] 缺失（client bundle 路径）");
+    else if (!existsSync(join(ROOT, pkg.exports["./client"]))) problems.push(`exports["./client"] 指向的文件不存在：${pkg.exports["./client"]}`);
     for (const [label, entryPath] of [["main", pkg.main], ["exports[\".\"]", pkg.exports?.["."]]]) {
       if (typeof entryPath !== "string" || entryPath === "") problems.push(`package.json#${label} 缺失或非字符串（Cordis 入口）`);
       else if (!existsSync(join(ROOT, entryPath))) problems.push(`package.json#${label} 指向的文件不存在：${entryPath}`);
@@ -395,6 +401,7 @@ const packageJsonGate = gate(
     const check = (text) => {
       const pkg = JSON.parse(text);
       if (typeof pkg.dsh?.bundle?.patch !== "string") throw new Error("no bundle patch");
+      if (typeof pkg.dsh?.client?.platform !== "string") throw new Error("no client platform");
       if (typeof pkg.main !== "string" || !existsSync(join(ROOT, pkg.main))) throw new Error("no main");
       if (typeof pkg.dependencies?.["ddg-kit"] !== "string") throw new Error("no ddg-kit dep");
     };
@@ -404,7 +411,7 @@ const packageJsonGate = gate(
       problems.push("非法 JSON 未被拒绝");
     } catch {}
     try {
-      check(JSON.stringify({ name: "x", version: "0.1.0", license: "MIT", type: "module", files: [], dsh: { bundle: { patch: "./cordis.patch.yml" } }, main: "./index.mjs" }));
+      check(JSON.stringify({ name: "x", version: "0.1.0", license: "MIT", type: "module", files: [], dsh: { bundle: { patch: "./cordis.patch.yml" }, client: { platform: "web" } }, main: "./index.mjs" }));
       problems.push("无 ddg-kit 依赖的包未被拒绝");
     } catch {}
     return problems;
@@ -635,6 +642,215 @@ const visionExecuteGate = gate(
   },
 );
 
+/* -------------------------- client bundle 门禁 -------------------------- */
+
+const CLIENT_PATH = join(ROOT, "client", "index.js");
+// 平台静态词白名单（对齐 dsh-client-web getStaticModules 的 seed 表）——
+// client bundle 只允许 require 这些词，跨插件值 import 被 client-modules 禁止。
+const CLIENT_REQUIRE_ALLOWED = new Set([
+  "react",
+  "react/jsx-runtime",
+  "react-dom",
+  "react-dom/client",
+  "@deepseek-ai/cordis",
+  "@deepseek-ai/dsh-client-ui-slots",
+  "@deepseek-ai/dsh-client-web-react",
+  "@deepseek-ai/dsh-client-ui-primitives",
+  "@deepseek-ai/dsh-client-ui-attachment",
+  "@deepseek-ai/dsh-client-schema-form",
+]);
+
+/** client bundle 机械检查：注册通道、require 白名单、导出契约。 */
+function checkClientBundleText(text) {
+  const problems = [];
+  if (!/window\.__ModuleLoader__\.load\(\{/.test(text)) {
+    problems.push("client bundle 缺少 window.__ModuleLoader__.load 包装（client-modules 注册通道）");
+  }
+  if (!/factory:\s*\(require\)\s*=>/.test(text)) {
+    problems.push("client bundle 的 load 缺少 factory(require) 工厂");
+  }
+  for (const match of text.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)) {
+    if (!CLIENT_REQUIRE_ALLOWED.has(match[1])) {
+      problems.push(`client bundle require 了白名单外的模块：${match[1]}（跨插件值 import 被禁止）`);
+    }
+  }
+  if (!/exports\.name\s*=\s*["']dsh-rider["']/.test(text)) problems.push("client bundle 未导出 name 'dsh-rider'");
+  if (!/exports\.inject\s*=/.test(text)) problems.push("client bundle 未导出 inject（服务注入声明）");
+  if (!/exports\.apply\s*=/.test(text)) problems.push("client bundle 未导出 apply");
+  return problems;
+}
+
+/** 平台静态词 stub：vm 沙箱的 require 解析面（白名单外的 spec 直接抛错）。 */
+function makeClientRequireStubs() {
+  const modules = {
+    "react": { createElement: (type, props, ...children) => ({ type, props, children }), useSyncExternalStore: () => null },
+    "react/jsx-runtime": {},
+    "@deepseek-ai/dsh-client-ui-slots": { resolveSlotLabel: (label) => (typeof label === "function" ? label() : label) },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      Button: (props) => ({ __component: "Button", props }),
+      Input: (props) => ({ __component: "Input", props }),
+    },
+  };
+  return (spec) => {
+    if (!(spec in modules)) throw new Error(`client-execute: 白名单外 require：${spec}`);
+    return modules[spec];
+  };
+}
+
+/** 在 vm 沙箱执行 client bundle，返回 factory 产物与 load 记录。 */
+function loadClientBundle(code) {
+  let handoff = null;
+  const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, console };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox, { filename: "client/index.js" });
+  if (handoff === null) throw new Error("client-execute: bundle 未调用 __ModuleLoader__.load");
+  if (handoff.id !== "dsh-rider") throw new Error(`client-execute: load id 应为 dsh-rider，实际 ${handoff.id}`);
+  return handoff.factory(makeClientRequireStubs());
+}
+
+/** 跑 client apply(fakeCtx)，返回注册记录与 fake scope。 */
+function runClientApply(mod) {
+  const localeRegistrations = [];
+  const slotRegistrations = [];
+  const slotInjections = [];
+  const bindings = [];
+  let user = {};
+  let value = {};
+  const scopeListeners = new Set();
+  const scope = {
+    getSnapshot: () => ({ status: "ready", value, base: {}, user, revision: 1, writable: true, mode: "host" }),
+    subscribe: (listener) => { scopeListeners.add(listener); return () => { scopeListeners.delete(listener); }; },
+    set: async (field, v) => { user = { ...user, [field]: v }; value = { ...value, [field]: v }; for (const l of [...scopeListeners]) l(); },
+    unset: async (field) => {
+      const nextUser = { ...user };
+      delete nextUser[field];
+      user = nextUser;
+      const nextValue = { ...value };
+      delete nextValue[field];
+      value = nextValue;
+      for (const l of [...scopeListeners]) l();
+    },
+  };
+  const fakeCtx = {
+    effect: (fn) => { fn(); },
+    locale: {
+      register: (ns, dicts) => { localeRegistrations.push({ ns, dicts }); },
+      bind: (ns) => (key) => localeRegistrations.find((r) => r.ns === ns)?.dicts.zh?.[key] ?? key,
+    },
+    settingsScope: { bind: (spec) => { bindings.push(spec); return scope; } },
+    slots: {
+      inject: (key, callback) => { for (const entry of callback()) slotInjections.push({ key, entry }); },
+      register: (opts, component) => { slotRegistrations.push({ opts, component }); },
+    },
+  };
+  mod.apply(fakeCtx);
+  return { localeRegistrations, slotRegistrations, slotInjections, bindings, scope };
+}
+
+const clientBundleGate = gate(
+  "client-bundle",
+  () => checkClientBundleText(readFileSync(CLIENT_PATH, "utf8")),
+  () => {
+    const problems = [];
+    const bad1 = "window.ModuleLoader.load({ id: 'x', factory: (require) => {} });\n";
+    if (checkClientBundleText(bad1).length === 0) problems.push("自证失败：无 __ModuleLoader__ 包装的样例未被拒绝");
+    const bad2 = "window.__ModuleLoader__.load({ id: 'dsh-rider', factory: (require) => {\n  require('@deepseek-ai/dsh-client-ui-settings-plugins');\n  exports.name = 'dsh-rider'; exports.inject = []; exports.apply = () => {};\n  return module.exports;\n} });\n";
+    const problems2 = checkClientBundleText(bad2);
+    if (problems2.length === 0 || !problems2.some((p) => p.includes("白名单外"))) {
+      problems.push("自证失败：白名单外 require 的样例未被拒绝");
+    }
+    return problems;
+  },
+);
+
+const clientExecuteGate = gate(
+  "client-execute",
+  async () => {
+    const problems = [];
+    let mod;
+    try {
+      mod = loadClientBundle(readFileSync(CLIENT_PATH, "utf8"));
+    } catch (error) {
+      return [`client bundle 执行失败：${error.message}`];
+    }
+    if (mod.name !== "dsh-rider") problems.push(`client 导出 name 不符：${mod.name}`);
+    if (!Array.isArray(mod.inject) || !["slots", "locale", "settingsScope"].every((s) => mod.inject.includes(s))) {
+      problems.push(`client inject 未声明全部服务（slots/locale/settingsScope）：${JSON.stringify(mod.inject)}`);
+    }
+    if (typeof mod.apply !== "function") return [...problems, "client 未导出 apply"];
+    const { localeRegistrations, slotRegistrations, slotInjections, bindings } = runClientApply(mod);
+    if (bindings.length !== 1 || bindings[0].namespace !== "dsh-rider") {
+      problems.push(`settingsScope.bind 未绑定 dsh-rider 命名空间：${JSON.stringify(bindings)}`);
+    }
+    const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
+    if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden"]) {
+      if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
+    }
+    const card = slotRegistrations.find((r) => r.opts?.name === "settings.plugin.item" && r.opts?.id === "dsh-rider");
+    if (!card) {
+      problems.push("未注册 settings.plugin.item / dsh-rider 卡片");
+    } else {
+      if (card.opts.locale !== "dsh-rider") problems.push("卡片 locale 未声明 dsh-rider 字典");
+      const face = card.opts.inject();
+      const store = face.hooks?.riderVisionCard;
+      if (!store || typeof store.getSnapshot !== "function" || typeof store.subscribe !== "function") {
+        problems.push("卡片 inject 缺 hooks.riderVisionCard（getSnapshot/subscribe）");
+      } else {
+        const initial = store.getSnapshot();
+        if (initial.available !== true || initial.writable !== true) problems.push(`卡片初始状态异常：${JSON.stringify(initial)}`);
+        if (initial.visionModel?.text !== "" || initial.visionProvider?.text !== "") problems.push("卡片初始字段文本应为空");
+        // 编辑 → 保存
+        face.edit("visionModel", "gpt-4o");
+        const staged = store.getSnapshot();
+        if (staged.visionModel?.text !== "gpt-4o" || staged.visionModel?.overridden !== true || staged.dirty !== true) {
+          problems.push(`编辑后卡片状态异常：${JSON.stringify(staged)}`);
+        }
+        // 用真实 scope 引用跑保存（runClientApply 的 scope 闭包在 fakeCtx 内，此处通过 inject 面无法直接拿 scope；
+        // 保存断言放到下面用 runClientApply 返回的 scope 检查）——save 是异步，await 后读 store。
+        await face.save();
+        const saved = store.getSnapshot();
+        if (saved.visionModel?.text !== "gpt-4o" || saved.visionModel?.overridden !== true) {
+          problems.push(`保存后卡片状态异常：${JSON.stringify(saved)}`);
+        }
+        // 清除（重置）→ 保存
+        face.resetField("visionModel");
+        if (store.getSnapshot().visionModel?.text !== "") problems.push("重置后草稿文本应为空");
+        await face.save();
+        const cleared = store.getSnapshot();
+        if (cleared.visionModel?.text !== "" || cleared.visionModel?.overridden !== false) {
+          problems.push(`清除保存后卡片状态异常：${JSON.stringify(cleared)}`);
+        }
+        // 丢弃
+        face.edit("visionProvider", "openai");
+        face.discard();
+        const discarded = store.getSnapshot();
+        if (discarded.dirty !== false || discarded.visionProvider?.text !== "") problems.push(`丢弃后卡片状态异常：${JSON.stringify(discarded)}`);
+      }
+      if (slotInjections.length !== 1 || slotInjections[0].key !== "settings.plugin.item") {
+        problems.push(`slots.inject 未挂到 settings.plugin.item：${JSON.stringify(slotInjections)}`);
+      }
+    }
+    return problems;
+  },
+  async () => {
+    const problems = [];
+    // 自证：白名单外 require 的 bundle 必须被沙箱拒绝
+    const bad = "window.__ModuleLoader__.load({ id: 'dsh-rider', factory: (require) => {\n  require('@deepseek-ai/dsh-client-ui-settings-plugins');\n  exports.name = 'dsh-rider'; exports.inject = []; exports.apply = () => {};\n  return module.exports;\n} });\n";
+    try {
+      loadClientBundle(bad);
+      problems.push("自证失败：白名单外 require 的 bundle 未被沙箱拒绝");
+    } catch {}
+    const noLoad = "module.exports = { name: 'dsh-rider', inject: [], apply: () => {} };\n";
+    try {
+      loadClientBundle(noLoad);
+      problems.push("自证失败：未调用 __ModuleLoader__.load 的 bundle 未被沙箱拒绝");
+    } catch {}
+    return problems;
+  },
+);
+
 const mdLinksGate = gate(
   "md-links",
   () => {
@@ -717,7 +933,7 @@ const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1] : null;
 let failed = 0;
 
-for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, mdLinksGate, decisionsGate]) {
+for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
   if (only && g.name !== only) continue;
   const self = await g.selfTest();
   if (self.length > 0) {

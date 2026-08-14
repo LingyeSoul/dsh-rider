@@ -6,6 +6,7 @@
   "main": "./index.mjs",
   "exports": {
     ".": "./index.mjs",
+    "./client": "./client/index.js",
     "./package.json": "./package.json"
   },
   "license": "GPL-3.0",
@@ -26,6 +27,7 @@
   ],
   "files": [
     "index.mjs",
+    "client",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -36,6 +38,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   }
 }
