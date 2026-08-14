@@ -683,7 +683,7 @@ function checkClientBundleText(text) {
 /** 平台静态词 stub：vm 沙箱的 require 解析面（白名单外的 spec 直接抛错）。 */
 function makeClientRequireStubs() {
   const modules = {
-    "react": { createElement: (type, props, ...children) => ({ type, props, children }), useSyncExternalStore: () => null },
+    "react": { createElement: (type, props, ...children) => ({ type, props, children }), useState: (init) => [typeof init === "function" ? init() : init, () => {}], useEffect: () => {} },
     "react/jsx-runtime": {},
     "@deepseek-ai/dsh-client-ui-slots": { resolveSlotLabel: (label) => (typeof label === "function" ? label() : label) },
     "@deepseek-ai/dsh-client-ui-primitives": {

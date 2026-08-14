@@ -1,5 +1,5 @@
 /**
- * dsh-rider client half：设置 → 导航里的「dsh-rider」设置页。
+ * dsh-rider client half：设置导航里的「dsh-rider」设置页。
  *
  * 注册一张独立的 settings.section 设置页（order 50），编辑前置视觉理解的
  * 默认配置（visionProvider / visionModel / visionPrompt）。数据通道走 Node half
@@ -10,14 +10,17 @@
  * 直连 ctx.settings scope（applies:'live'，写即 commit+emit，零重启热更新）。
  * 解法对齐 plugin-registry 的薄控制台（settings.section + 自建 /api 路由）。
  *
+ * 组件自包含纪律（对齐 plugin-registry ConsolePanel + 官方 settings.section
+ * example）：settings.section 的组件**不接 props**（slot 框架不像
+ * settings.plugin.item 那样注入 t/useXxx）——组件用 useSyncExternalStore 直接
+ * 订阅模块级 controller 单例的 store，文案 t 为模块级函数，零 props 依赖。
+ *
  * 依赖纪律（client bundle purity）：
- *  - require 只允许平台静态词（react / react/jsx-runtime /
- *    @deepseek-ai/dsh-client-ui-primitives / @deepseek-ai/dsh-client-ui-slots）；
+ *  - require 只允许平台静态词（react / @deepseek-ai/dsh-client-ui-primitives）；
  *  - 跨包协作走 cordis 服务注入（slots / locale），不 import 任何
  *    @deepseek-ai 官方 client 包（client-modules 禁止跨插件值 import）；
  *  - 表单状态机自实现（staged draft、save 单点写入、空文本=清除、overridden
- *    以 user 层 presence 判定），对齐官方 CardForm 语义但因走自建路由，
- *    resolved/user 两层均来自 GET 响应而非 settingsScope wire 快照。
+ *    以 user 层 presence 判定），resolved/user 两层来自 GET 响应。
  *
  * 本文件即产物（CJS + __ModuleLoader__.load 包装，零构建链，git 源一行安装）；
  * 决策见 decisions/implemented/2026-08-15-vision-settings-section-page.md。
@@ -31,7 +34,9 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
+    const { useState, useEffect } = React
     const { Button, Input } = require('@deepseek-ai/dsh-client-ui-primitives')
+    const h = React.createElement.bind(React)
 
     /* ------------------------------ 文案 ------------------------------ */
 
@@ -75,6 +80,9 @@ window.__ModuleLoader__.load({
       loading: '加载中…',
       loadFailed: '读取设置失败',
     }
+
+    /** 模块级文案函数：优先跟随 ctx.locale 绑定，回退中文字典。apply 时增强。 */
+    let t = (key) => zh[key] ?? en[key] ?? key
 
     /* --------------------------- 表单状态机 --------------------------- */
 
@@ -219,10 +227,14 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** inject 面：供门禁经 slot.opts.inject() 访问 store/actions（组件不依赖它）。 */
       inject() {
         return { hooks: { riderVisionCard: this.store }, ...this.actions() }
       }
     }
+
+    /** 模块级 controller 单例（apply 时创建；组件经此订阅，零 props 依赖）。 */
+    let controller = null
 
     /* ------------------------------ 卡片 ------------------------------ */
 
@@ -288,42 +300,47 @@ window.__ModuleLoader__.load({
     const errorStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-error, #c0392b)' }
     const mutedStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, inherit)' }
 
-    function fieldRow(t, field, label, hint, state, disabled, props) {
-      return React.createElement(
+    function fieldRow(field, label, hint, state, disabled, actions) {
+      return h(
         'div', { key: field, style: fieldStyle },
-        React.createElement('div', { style: fieldHeadStyle },
-          React.createElement('label', { htmlFor: `rider-${field}`, style: labelStyle }, label),
+        h('div', { style: fieldHeadStyle },
+          h('label', { htmlFor: `rider-${field}`, style: labelStyle }, label),
+          state.overridden ? h('span', { style: badgeStyle }, t('overridden')) : null,
           state.overridden
-            ? React.createElement('span', { style: badgeStyle }, t('overridden'))
-            : null,
-          state.overridden
-            ? React.createElement('button', { type: 'button', style: resetStyle, disabled, onClick: () => props.resetField(field) }, t('reset'))
+            ? h('button', { type: 'button', style: resetStyle, disabled, onClick: () => actions.resetField(field) }, t('reset'))
             : null,
         ),
-        React.createElement(Input, {
+        h(Input, {
           id: `rider-${field}`,
           value: state.text,
           disabled,
           style: inputStyle,
           placeholder: hint,
-          onChange: (event) => props.edit(field, event.target.value),
+          onChange: (event) => actions.edit(field, event.target.value),
         }),
-        React.createElement('p', { style: hintStyle }, hint),
+        h('p', { style: hintStyle }, hint),
       )
     }
 
-    function RiderVisionPage(props) {
-      const t = props.t
-      const state = props.useRiderVisionCard((snapshot) => snapshot)
-      if (state.loading) {
-        return React.createElement('div', { style: pageStyle },
-          React.createElement('p', { style: mutedStyle }, t('loading')),
-        )
+    /** 设置页组件：不接 props（settings.section 不注入 t/useXxx）。自包含订阅模块级单例。
+     *  用 useState+useEffect 手动订阅 external store（对齐 plugin-registry ConsolePanel，
+     *  零 react 版本风险——不依赖 useSyncExternalStore）。 */
+    function RiderVisionPage() {
+      const [state, setState] = useState(controller ? controller.store.getSnapshot() : { loading: true })
+      useEffect(() => {
+        if (!controller) return
+        const update = () => setState(controller.store.getSnapshot())
+        update()
+        return controller.store.subscribe(update)
+      }, [])
+      const actions = controller ? controller.actions() : null
+      if (!actions || state.loading) {
+        return h('div', { style: pageStyle }, h('p', { style: mutedStyle }, t('loading')))
       }
       if (state.loadFailed) {
-        return React.createElement('div', { style: pageStyle },
-          React.createElement('p', { style: errorStyle }, t('loadFailed')),
-          React.createElement(Button, { variant: 'outline', size: 'sm', onClick: props.retry }, t('reset')),
+        return h('div', { style: pageStyle },
+          h('p', { style: errorStyle }, t('loadFailed')),
+          h(Button, { variant: 'outline', size: 'sm', onClick: actions.retry }, t('reset')),
         )
       }
       const disabled = state.saving
@@ -332,28 +349,31 @@ window.__ModuleLoader__.load({
         ['visionModel', t('visionModel'), t('visionModelHint')],
         ['visionPrompt', t('visionPrompt'), t('visionPromptHint')],
       ]
-      return React.createElement(
+      return h(
         'div', { style: pageStyle },
-        React.createElement('h2', { style: titleStyle }, t('title')),
-        React.createElement('p', { style: descStyle }, t('description')),
-        React.createElement(
+        h('h2', { style: titleStyle }, t('title')),
+        h('p', { style: descStyle }, t('description')),
+        h(
           'div', { style: editorStyle },
-          rows.map(([field, label, hint]) => fieldRow(t, field, label, hint, state[field], disabled, props)),
-          React.createElement('div', { style: actionsStyle },
+          rows.map((row) => {
+            const [field, label, hint] = row
+            return fieldRow(field, label, hint, state[field], disabled, actions)
+          }),
+          h('div', { style: actionsStyle },
             state.dirty
-              ? React.createElement(Button, { variant: 'ghost', size: 'sm', disabled, onClick: props.discard }, t('discard'))
+              ? h(Button, { variant: 'ghost', size: 'sm', disabled, onClick: actions.discard }, t('discard'))
               : null,
-            React.createElement(
+            h(
               Button,
               {
                 variant: 'primary',
                 size: 'sm',
                 disabled: disabled || !state.dirty,
-                onClick: props.save,
+                onClick: actions.save,
               },
               state.saving ? t('saving') : t('save'),
             ),
-            state.failed ? React.createElement('p', { style: errorStyle }, t('saveFailed')) : null,
+            state.failed ? h('p', { style: errorStyle }, t('saveFailed')) : null,
           ),
         ),
       )
@@ -362,15 +382,22 @@ window.__ModuleLoader__.load({
     /* ------------------------------ 挂载 ------------------------------ */
 
     function apply(ctx) {
-      const controller = new RiderVisionCardController()
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-rider: settings page dictionaries')
+      // 文案函数：优先跟随 ctx.locale 绑定（若服务提供），回退模块级中英字典。
+      try {
+        const bound = ctx.locale?.bind?.(NS)
+        if (typeof bound === 'function') t = bound
+      } catch {
+        // 保持默认中文字典回退
+      }
+      controller = new RiderVisionCardController()
       ctx.slots.inject('settings.section', () =>
         ctx.slots.register({
           name: 'settings.section',
           id: 'dsh-rider',
           order: 50,
           label: () => 'dsh-rider',
-          inject: () => controller.inject(),
+          inject: () => (controller ? controller.inject() : {}),
         }, RiderVisionPage))
     }
 
