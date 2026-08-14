@@ -29,9 +29,24 @@
 ## 前置视觉理解（vision_understand）
 
 **使用场景**：会话模型不支持图片输入（无 image 模态，如 `deepseek-v4-flash`）、
-而用户提供了图片时，agent 调用 `vision_understand` 让支持视觉的模型理解图片，
-再把返回的描述转述给用户。系统提示已注入指引（`tool:vision` 段），模型会自动
-优先走此路径。
+而用户想让 agent 看一张图时，agent 调用 `vision_understand` 让支持视觉的模型
+理解图片，再把返回的描述转述给用户。系统提示已注入指引（`tool:vision` 段），
+模型会自动优先走此路径。
+
+> **⚠️ 关于"直接粘贴图片"**：DSH 框架在 `dsh-host-apiproxy` 的 prompt 入口处，
+> 于进入 agent turn **之前**校验——若消息含图片附件且当前会话模型不支持图片，
+> 直接拦截并提示"当前模型不支持图片，请切换支持图片的模型"，含图片的消息**不会
+> 到达 agent**（`vision_understand` 因此不会被触发）。这是框架级拦截
+> （`MODEL_DOES_NOT_SUPPORT_IMAGES`），第三方插件无法绕过。
+>
+> **正确用法**：在纯文本会话模型下，以**文字形式**提供图片来源，让 agent 调
+> `vision_understand`，而不是直接粘贴图片附件：
+> - 「帮我看看 `E:\screenshots\error.png` 这张图是什么」
+> - 「这张图片里的文字是什么：`https://example.com/chart.png`」
+>
+> 消息是纯文本（不含 image block），不触发 DSH 拦截，进入 agent turn 后系统
+> 提示会引导 agent 调用 `vision_understand` 传入该路径/URL。若会话模型本身支持
+> 图片（如 `gpt-4o`），直接粘贴即可，无需本工具。
 
 ```
 工具：vision_understand

@@ -14,9 +14,16 @@
  *     使用本工具，内置 `web_search` 仅作最终后备。
  *
  * 能力二：`vision_understand` 工具 —— 前置视觉理解。
- *   - 当会话模型不支持图片输入（inputModalities 不含 image）而用户提供图片
- *     （本地路径 / http(s) URL / data: URL）时，由本工具把图片交给 dsh 配置
- *     中支持视觉的模型理解，返回文字描述。
+ *   - 背景：DSH 框架在 `dsh-host-apiproxy` 的 prompt handler `admit()` 中，于
+ *     持久化用户消息与进入 agent turn 之前校验——若消息含 `type:'image'` 块且
+ *     当前会话模型 inputModalities 不含 image，直接返回 attachment-error
+ *     （`MODEL_DOES_NOT_SUPPORT_IMAGES`，前端提示"当前模型不支持图片"），
+ *     含图片的消息不会进入 agent turn。因此会话模型是纯文本模型时，用户无法
+ *     靠"粘贴图片"触发本工具——agent 收不到图片块。主入口改为用户以**文字**
+ *     提供图片来源（本地路径 / http(s) URL / data: URL），消息是纯文本不触发
+ *     拦截，进入 agent turn 后由系统提示（tool:vision 段）引导 agent 调用本工具。
+ *   - 工具收到图片来源后，由本工具把图片交给 dsh 配置中支持视觉的模型理解，
+ *     返回文字描述（agent 再转述给用户）。
  *   - 模型选择：工具参数 provider/model 显式指定 > `dsh-rider` settings 命名
  *     空间（visionProvider/visionModel）> 自动发现（遍历 ctx.llm 已注册提供商
  *     的模型，取第一个声明 inputModalities 含 image 的）。
@@ -451,7 +458,7 @@ export function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'vision_understand',
-    description: 'Front-loaded vision understanding: when the conversation model cannot accept image input (no image modality) and the user provides an image (local file path, http(s) URL, or data: URL), call a vision-capable model configured in DSH to describe the image, and return the description as text. Model selection: explicit provider/model arguments (must be given together) > dsh-rider settings visionProvider/visionModel > first model discovered with image input modality. 前置视觉理解：当你的模型不支持图片输入、而用户提供了图片（本地路径 / http(s) URL / data: URL）时，用 dsh 配置中支持视觉的模型理解图片并返回文字描述。',
+    description: 'Front-loaded vision understanding: DSH blocks image attachments sent to a model without image input modality (returns "当前模型不支持图片"), so when the session model cannot see images and the user references an image by local file path, http(s) URL, or data: URL in their message, call this tool with that image source — a vision-capable model configured in DSH describes the image and returns the description as text. The session model itself cannot view the image, so you MUST call this tool to understand any image the user points to by path/URL; do not guess or claim you can see it. Model selection: explicit provider/model arguments (must be given together) > dsh-rider settings visionProvider/visionModel > first model discovered with image input modality. 前置视觉理解：DSH 会拦截发往不支持图片的模型的图片附件（提示"当前模型不支持图片"），因此会话模型看不到图片时，用户会以文字形式给出图片来源（本地路径 / http(s) URL / data: URL）——你见到消息里的图片路径/URL 且需要理解图片内容时，必须调用本工具让 dsh 配置的视觉模型理解图片并返回文字描述，不要假装自己能看到图片。模型选择：工具参数 provider/model 显式指定 > dsh-rider settings visionProvider/visionModel > 自动发现第一个声明支持图片输入的模型。',
     parameters: {
       image: {
         type: 'string',
@@ -517,8 +524,9 @@ export function apply(ctx) {
     name: 'tool:vision',
     order: 116,
     text: [
-      'When the conversation model does not support image input and the user provides an image (local file path, http(s) URL, or data: URL), do not try to interpret it directly: call `vision_understand` with the image source, then relay the returned description to the user.',
-      '你的模型不支持图片输入、而用户提供了图片（本地路径 / http(s) URL / data: URL）时，调用 `vision_understand` 让 dsh 配置的视觉模型理解图片，再把返回的描述转述给用户。',
+      'DSH blocks image attachments sent to a model without image input modality (the user sees "当前模型不支持图片，请切换支持图片的模型"), so a user who wants you to look at an image on a text-only model will reference it by local file path, http(s) URL, or data: URL in their message text instead of attaching it.',
+      'When the user mentions an image by path/URL and you need to understand its contents, call `vision_understand` with that image source — the session model cannot view the image, so you MUST call the tool rather than guessing or claiming you can see it; relay the returned description back to the user.',
+      'DSH 会拦截发往不支持图片的模型的图片附件（用户会看到"当前模型不支持图片，请切换支持图片的模型"），所以用户想在纯文本模型上看图时，会以文字形式给出图片路径/URL 而非直接粘贴图片。当用户在消息里提到图片路径/URL 且需要理解图片内容时，调用 `vision_understand` 传入该图片来源——会话模型本身看不到图片，你必须调用工具而非猜测或假装能看到，再把返回的描述转述给用户。',
     ].join('\n'),
   })
 
