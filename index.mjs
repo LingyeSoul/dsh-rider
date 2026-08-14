@@ -45,6 +45,13 @@
  *     register 时 applies:'live'，写即 commit+emit，零重启热更新）。
  *   - GET 读 dsh-rider 段三个字段的 user 层覆盖值与 resolved 值；
  *   - POST 写：update 合并 patch（字段置值）/ replace({}) 清空 user 层（重置）。
+ *   - POST '/api/dsh-rider-vision/understand'：图片理解——client half 设置页的
+ *     「图片理解」卡片粘贴/上传图片（base64 data URL）经此路由，handler 在 host
+ *     进程内复用 vision_understand 的 resolveImageSource/resolveVisionModel/
+ *     runVisionCall 直接走 ctx.llm.stream 调视觉模型，返回文字描述。**不经 DSH
+ *     对话流**（apiproxy prompt handler 的图片准入拦截不触发），是纯文本会话模型
+ *     下"粘贴图片看图"的正解——用户在 dsh-rider 设置页粘贴图片，而非在对话流
+ *     发送（后者会被框架拦截）。
  *
  * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md、
  * 2026-08-14-vision-preprocessor-tool.md 与
@@ -612,8 +619,57 @@ export function apply(ctx) {
           }
         },
       })
-      return () => stop?.()
-    }, 'dsh-rider: vision settings route')
+      /* 图片理解路由：'/api/dsh-rider-vision/understand'。
+       * client half 设置页的「图片理解」卡片经此路由粘贴/上传图片——图片以
+       * base64 data URL 走 HTTP body，不经 DSH 对话流（apiproxy prompt handler
+       * 的图片准入拦截不触发），handler 在 host 进程内复用 vision_understand 的
+       * resolveImageSource/resolveVisionModel/runVisionCall，直接走 ctx.llm.stream
+       * 调视觉模型，返回文字描述。这是纯文本会话模型下"粘贴图片看图"的正解。 */
+      const stopUnderstand = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-vision/understand',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          const ac = new AbortController()
+          req?.on?.('close', () => { if (!res.writableEnded) ac.abort() })
+          try {
+            if (req?.method !== 'POST') {
+              send(405, { ok: false, message: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req)
+            const source = body.image
+            if (typeof source !== 'string' || source.trim() === '') {
+              send(400, { ok: false, message: 'image 不能为空（需 data:image/...;base64,... 或 http(s) URL 或本地路径）' })
+              return
+            }
+            const image = await resolveImageSource(source, ac.signal)
+            const prompt = (typeof body.prompt === 'string' && body.prompt.trim() !== ''
+              ? body.prompt
+              : visionSettings.get()?.visionPrompt ?? VISION_DEFAULT_PROMPT).trim()
+            if (prompt === '') { send(400, { ok: false, message: 'prompt 不能为空' }); return }
+            const vision = await resolveVisionModel(ctx, visionSettings, body.provider, body.model)
+            const note = await currentModelVisionNote(ctx, ac.signal)
+            const result = await runVisionCall(ctx, {
+              provider: vision.provider,
+              model: vision.model,
+              image,
+              prompt,
+              signal: ac.signal,
+            })
+            send(200, { ok: true, ...result, note })
+          } catch (error) {
+            if (ac.signal.aborted) { send(499, { ok: false, message: '请求已取消' }); return }
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
+      return () => { stop?.(); stopUnderstand?.() }
+    }, 'dsh-rider: vision settings + understand routes')
   }
 }
 

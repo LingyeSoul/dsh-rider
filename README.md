@@ -89,6 +89,22 @@ llm-pi-ai:
 返回结构：`{ provider, model, text, reasoning?, note?, image: {mediaType, width, height, bytes} }`；
 `note` 在会话模型已支持视觉时给出提示（不阻断）。
 
+## 图片理解卡片（设置页内粘贴/上传图片看图）
+
+纯文本会话模型下，DSH 会在对话流拦截直接粘贴的图片（提示"当前模型不支持图片"）。
+dsh-rider 设置页提供「图片理解」卡片，**绕开对话流**直接看图：图片经 dsh-rider
+自建 HTTP 路由直抵 Node half 的视觉模型调用链（不经 apiproxy 的 prompt 入口，
+不触发图片准入拦截）。
+
+**用法**：打开设置 → dsh-rider 设置页 → 「图片理解」卡片 → 粘贴（Ctrl/Cmd+V）/
+拖拽/点击上传图片 → 点「理解」→ 视觉模型返回的描述显示在卡片内（含模型元信息 +
+复制按钮）。描述不自动写入对话流，可自行复制后以文字发给 agent。
+
+模型选择与 vision_understand 工具一致（工具参数 > settings > 自动发现），复用
+同一套视觉调用逻辑。若会话模型本身支持图片，直接对话流粘贴即可，无需本卡片。
+
+> 技术细节见决策记录 `decisions/implemented/2026-08-15-image-understand-card.md`。
+
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /

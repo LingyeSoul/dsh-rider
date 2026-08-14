@@ -705,6 +705,10 @@ function makeVisionFetchStub() {
     fetch: async (url, opts) => {
       state.calls.push({ url, method: opts?.method ?? "GET", body: opts?.body });
       const method = opts?.method ?? "GET";
+      // 图片理解路由：返回假描述（语义正确，门禁不渲染卡片但 stub 应识别该 URL）。
+      if (typeof url === "string" && url.includes("/understand")) {
+        return { ok: true, json: async () => ({ ok: true, provider: "stub", model: "stub-vision", text: "(stub) a test image", note: undefined }) };
+      }
       // GET：返回当前 resolved/user 快照。
       if (method === "GET") {
         return { ok: true, json: async () => ({ ok: true, resolved: { ...state.resolved }, user: { ...state.user } }) };

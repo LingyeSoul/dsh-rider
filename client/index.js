@@ -60,6 +60,18 @@ window.__ModuleLoader__.load({
       saveFailed: 'Save failed',
       loading: 'Loading…',
       loadFailed: 'Failed to load settings',
+      imageTitle: 'Image understanding',
+      imageDescription: 'Paste (Ctrl/Cmd+V), drag-drop, or click to upload an image — it goes directly to a vision-capable model via dsh-rider, bypassing DSH\'s conversation image-attachment gate (which blocks images on text-only models). Useful when your session model cannot see images.',
+      imageHint: 'The image is sent to the dsh-rider-configured vision model; the returned description is shown below. Does not enter the conversation flow.',
+      imageDropzone: 'Paste / drop / click to upload an image',
+      imageSupported: 'png · jpg · webp · gif',
+      imageClear: 'Clear',
+      imageUnderstand: 'Understand',
+      imageUnderstanding: 'Understanding…',
+      imageCopy: 'Copy',
+      imageCopied: 'Copied',
+      modelUsed: 'model',
+      imageNoModel: 'No vision model configured — set visionProvider/visionModel above, or ensure a provider declares an image-capable model.',
     }
 
     const zh = {
@@ -79,6 +91,18 @@ window.__ModuleLoader__.load({
       saveFailed: '保存失败',
       loading: '加载中…',
       loadFailed: '读取设置失败',
+      imageTitle: '图片理解',
+      imageDescription: '粘贴（Ctrl/Cmd+V）、拖拽或点击上传图片——图片经 dsh-rider 直接交给视觉模型，绕过 DSH 对话流的图片准入拦截（纯文本模型粘贴图片会被拦截）。会话模型看不到图片时可用此卡片看图。',
+      imageHint: '图片发送给 dsh-rider 配置的视觉模型，返回的描述显示在下方，不进入对话流。',
+      imageDropzone: '粘贴 / 拖拽 / 点击上传图片',
+      imageSupported: 'png · jpg · webp · gif',
+      imageClear: '清除',
+      imageUnderstand: '理解',
+      imageUnderstanding: '理解中…',
+      imageCopy: '复制',
+      imageCopied: '已复制',
+      modelUsed: '模型',
+      imageNoModel: '未配置视觉模型——请在上方填写 visionProvider/visionModel，或确保某提供商声明了支持图片的模型。',
     }
 
     /** 模块级文案函数：优先跟随 ctx.locale 绑定，回退中文字典。apply 时增强。 */
@@ -299,6 +323,182 @@ window.__ModuleLoader__.load({
     const actionsStyle = { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', paddingTop: 4 }
     const errorStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-error, #c0392b)' }
     const mutedStyle = { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, inherit)' }
+    const sectionTitleStyle = {
+      margin: '24px 0 0',
+      fontSize: 14,
+      fontWeight: 600,
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      lineHeight: 1.5,
+    }
+    const dropzoneStyle = {
+      border: '1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      borderRadius: 12,
+      padding: '24px 16px',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 8,
+      cursor: 'pointer',
+      textAlign: 'center',
+      transition: 'border-color .15s, background .15s',
+      background: 'var(--dsw-alias-bg-module-platform, transparent)',
+    }
+    const dropzoneHoverStyle = {
+      ...dropzoneStyle,
+      borderColor: 'var(--dsw-alias-accent-primary, #4f9eff)',
+      background: 'var(--dsw-alias-bg-elevated, rgba(79,158,255,.05))',
+    }
+    const previewWrapStyle = { display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }
+    const previewImgStyle = { maxWidth: '100%', maxHeight: 280, borderRadius: 8, objectFit: 'contain', border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))' }
+    const resultBoxStyle = {
+      margin: 0,
+      padding: '12px 14px',
+      fontSize: 13,
+      lineHeight: 1.6,
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      background: 'var(--dsw-alias-bg-module-platform, transparent)',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+      borderRadius: 8,
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+    }
+    const metaStyle = { fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)', fontFamily: 'ui-monospace, monospace' }
+
+    /** 读取 File 为 data URL（base64）。 */
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ''))
+        reader.onerror = () => reject(new Error('read failed'))
+        reader.readAsDataURL(file)
+      })
+    }
+
+    /**
+     * 图片理解卡片：粘贴/拖拽/上传图片 → 预览 → POST /understand → 显示描述。
+     * 经 Node half 自建路由直抵视觉模型，不经 DSH 对话流（绕开图片准入拦截）。
+     * 不接 props，全自包含（模块级 t + useState）。
+     */
+    function ImageUnderstandCard() {
+      const [preview, setPreview] = useState(null) // {url,name}
+      const [busy, setBusy] = useState(false)
+      const [result, setResult] = useState(null) // {text, model, provider}
+      const [error, setError] = useState(null)
+      const [hover, setHover] = useState(false)
+      const [copied, setCopied] = useState(false)
+      const fileInputRef = useState(null)
+
+      const loadImage = async (file) => {
+        if (!file || !file.type.startsWith('image/')) return
+        try {
+          const url = await fileToDataURL(file)
+          setPreview({ url, name: file.name })
+          setResult(null)
+          setError(null)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      }
+
+      const onUnderstand = async () => {
+        if (!preview || busy) return
+        setBusy(true)
+        setError(null)
+        setResult(null)
+        setCopied(false)
+        try {
+          const response = await fetch('/api/dsh-rider-vision/understand', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ image: preview.url }),
+          })
+          const body = await response.json()
+          if (body?.ok !== true) throw new Error(body?.message ?? 'understand failed')
+          setResult({ text: body.text, model: body.model, provider: body.provider, note: body.note })
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+        setBusy(false)
+      }
+
+      const onClear = () => { setPreview(null); setResult(null); setError(null); setCopied(false) }
+
+      const onCopy = async () => {
+        if (!result?.text) return
+        try { await navigator.clipboard.writeText(result.text); setCopied(true) } catch {}
+      }
+
+      const onPaste = (e) => {
+        const items = e.clipboardData?.items
+        if (!items) return
+        for (const item of items) {
+          if (item.type.startsWith('image/')) {
+            const file = item.getAsFile()
+            if (file) { void loadImage(file); e.preventDefault(); break }
+          }
+        }
+      }
+      const onDrop = (e) => {
+        e.preventDefault(); setHover(false)
+        const file = e.dataTransfer?.files?.[0]
+        if (file) void loadImage(file)
+      }
+      const onDragOver = (e) => { e.preventDefault(); setHover(true) }
+      const onDragLeave = () => setHover(false)
+
+      const dzStyle = hover ? dropzoneHoverStyle : dropzoneStyle
+
+      return h('div', { style: editorStyle, onPaste },
+        // 标题 + 说明
+        h('h3', { style: { ...titleStyle, fontSize: 14, margin: 0 } }, t('imageTitle')),
+        h('p', { style: descStyle }, t('imageDescription')),
+        // 预览或上传区
+        preview
+          ? h('div', { style: previewWrapStyle },
+              h('img', { src: preview.url, alt: preview.name, style: previewImgStyle }),
+              h('span', { style: metaStyle }, preview.name),
+            )
+          : h('div', {
+              style: dzStyle,
+              onDrop, onDragOver, onDragLeave,
+              onClick: () => fileInputRef[0]?.click?.(),
+            },
+              h('span', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary, inherit)' } }, t('imageDropzone')),
+              h('span', { style: metaStyle }, t('imageSupported')),
+            ),
+        h('input', {
+          ref: (el) => { fileInputRef[0] = el },
+          type: 'file',
+          accept: 'image/png,image/jpeg,image/webp,image/gif',
+          style: { display: 'none' },
+          onChange: (e) => { const f = e.target.files?.[0]; if (f) void loadImage(f); e.target.value = '' },
+        }),
+        // 操作
+        h('div', { style: actionsStyle },
+          preview
+            ? h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: onClear }, t('imageClear'))
+            : null,
+          h(Button, {
+            variant: 'primary', size: 'sm',
+            disabled: !preview || busy,
+            onClick: onUnderstand,
+          }, busy ? t('imageUnderstanding') : t('imageUnderstand')),
+        ),
+        error ? h('p', { style: errorStyle }, error) : null,
+        // 结果
+        result
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                h('span', { style: metaStyle }, `${t('modelUsed')}: ${result.provider}/${result.model}`),
+                h(Button, { variant: 'ghost', size: 'sm', onClick: onCopy }, copied ? t('imageCopied') : t('imageCopy')),
+              ),
+              h('pre', { style: resultBoxStyle }, result.text),
+              result.note ? h('p', { style: mutedStyle }, result.note) : null,
+            )
+          : null,
+        h('p', { style: hintStyle }, t('imageHint')),
+      )
+    }
 
     function fieldRow(field, label, hint, state, disabled, actions) {
       return h(
@@ -376,6 +576,8 @@ window.__ModuleLoader__.load({
             state.failed ? h('p', { style: errorStyle }, t('saveFailed')) : null,
           ),
         ),
+        // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）
+        h(ImageUnderstandCard),
       )
     }
 
