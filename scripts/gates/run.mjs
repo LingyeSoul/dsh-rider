@@ -683,8 +683,15 @@ function checkClientBundleText(text) {
 /** 平台静态词 stub：vm 沙箱的 require 解析面（白名单外的 spec 直接抛错）。 */
 function makeClientRequireStubs() {
   const modules = {
-    "react": { createElement: (type, props, ...children) => ({ type, props, children }), useState: (init) => [typeof init === "function" ? init() : init, () => {}], useEffect: () => {} },
+    "react": {
+      createElement: (type, props, ...children) => ({ type, props, children }),
+      useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+      useEffect: () => {},
+      useRef: (init) => ({ current: typeof init === "function" ? init() : init }),
+      useCallback: (fn) => fn,
+    },
     "react/jsx-runtime": {},
+    "react-dom": { createPortal: (node) => node },
     "@deepseek-ai/dsh-client-ui-slots": { resolveSlotLabel: (label) => (typeof label === "function" ? label() : label) },
     "@deepseek-ai/dsh-client-ui-primitives": {
       Button: (props) => ({ __component: "Button", props }),
@@ -813,7 +820,7 @@ const clientExecuteGate = gate(
     await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
     const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
@@ -859,9 +866,15 @@ const clientExecuteGate = gate(
         const discarded = store.getSnapshot();
         if (discarded.dirty !== false || discarded.visionProvider?.text !== "") problems.push(`丢弃后设置页状态异常：${JSON.stringify(discarded)}`);
       }
-      if (slotInjections.length !== 1 || slotInjections[0].key !== "settings.section") {
-        problems.push(`slots.inject 未挂到 settings.section：${JSON.stringify(slotInjections)}`);
+      // 两个挂载点：settings.section（设置页）+ conversation.input.dock（composer 粘贴捕获）。
+      const injectedKeys = slotInjections.map((s) => s.key).sort();
+      const expectedKeys = ["conversation.input.dock", "settings.section"];
+      if (injectedKeys.length !== 2 || !expectedKeys.every((k) => injectedKeys.indexOf(k) >= 0)) {
+        problems.push(`slots.inject 应挂载 settings.section 与 conversation.input.dock：${JSON.stringify(slotInjections)}`);
       }
+      const dock = slotRegistrations.find((r) => r.opts && r.opts.name === "conversation.input.dock" && r.opts.id === "dsh-rider-composer-vision");
+      if (!dock) problems.push("未注册 conversation.input.dock / dsh-rider-composer-vision（composer 粘贴捕获）");
+      else if (typeof dock.component !== "function") problems.push("dock entry component 不是函数（应为 ComposerVisionDock）");
     }
     return problems;
   },

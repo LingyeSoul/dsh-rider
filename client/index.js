@@ -34,7 +34,10 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
-    const { useState, useEffect } = React
+    const { useState, useEffect, useRef, useCallback } = React
+    // react-dom 在 dsh-client-web 的平台静态词表内（见 dsh-client-web/lib/index.js 的
+    // module map），与官方 dsh-client-ui-trajectory 一样可在 client bundle 直接 require。
+    const { createPortal } = require('react-dom')
     const { Button, Input } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement.bind(React)
 
@@ -72,6 +75,10 @@ window.__ModuleLoader__.load({
       imageCopied: 'Copied',
       modelUsed: 'model',
       imageNoModel: 'No vision model configured — set visionProvider/visionModel above, or ensure a provider declares an image-capable model.',
+      composerCaptureToggle: 'Capture pasted/dropped images in the composer',
+      composerCaptureHint: 'When on, pasting or dropping an image into the composer sends it straight to the vision model and shows the description above the input (the image is NOT attached to the message — bypassing DSH\'s image gate on text-only models). Useful for text-only models; turn off to use native paste-to-attach on image-capable models.',
+      composerTitle: 'Pasted image \u2192 vision',
+      composerFailed: 'Vision call failed',
     }
 
     const zh = {
@@ -103,6 +110,10 @@ window.__ModuleLoader__.load({
       imageCopied: '已复制',
       modelUsed: '模型',
       imageNoModel: '未配置视觉模型——请在上方填写 visionProvider/visionModel，或确保某提供商声明了支持图片的模型。',
+      composerCaptureToggle: '在对话输入框捕获粘贴/拖拽的图片',
+      composerCaptureHint: '开启后，在对话输入框粘贴或拖入图片时，dsh-rider 会直接把图片发给视觉模型并在输入框上方显示描述（图片不会作为消息附件发送，绕开 DSH 对纯文本模型的图片拦截）。纯文本会话模型适用；若会话模型支持图片且想用原生粘贴附件，请关闭此项。',
+      composerTitle: '粘贴图片 \u2192 视觉理解',
+      composerFailed: '视觉理解失败',
     }
 
     /** 模块级文案函数：优先跟随 ctx.locale 绑定，回退中文字典。apply 时增强。 */
@@ -374,6 +385,291 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /* ------------ 对话 composer 级粘贴图片捕获（conversation.input.dock） ------------ */
+
+    /**
+     * 「对话粘贴捕获」开关，localStorage 持久化（默认开）。同一模块作用域内，设置页
+     * 的开关与 dock 组件共享（dock 在事件发生时读 getEnabled()，设置页订阅刷新）。
+     * 不走 Node half settings 命名空间——纯客户端偏好，零重启、零路由。
+     */
+    const composerVisionState = { enabled: true, listeners: new Set() }
+    try {
+      if (localStorage.getItem('dsh-rider.composerVision') === 'off') composerVisionState.enabled = false
+    } catch {
+      // vm 沙箱 / 无 localStorage 环境：保持默认开
+    }
+    const composerVisionStore = {
+      getEnabled: () => composerVisionState.enabled,
+      setEnabled: (value) => {
+        composerVisionState.enabled = !!value
+        try {
+          localStorage.setItem('dsh-rider.composerVision', composerVisionState.enabled ? 'on' : 'off')
+        } catch {
+          // 持久化失败不阻断（内存态仍生效）
+        }
+        for (const listener of [...composerVisionState.listeners]) listener()
+      },
+      subscribe: (listener) => {
+        composerVisionState.listeners.add(listener)
+        return () => composerVisionState.listeners.delete(listener)
+      },
+    }
+
+    /** dock 结果卡样式：position: fixed，锚在 composer 上方（fallback 右下角）。 */
+    const dockCardStyle = {
+      position: 'fixed',
+      zIndex: 9_999,
+      boxSizing: 'border-box',
+      maxHeight: '70vh',
+      overflow: 'auto',
+      borderRadius: 12,
+      background: 'var(--dsw-alias-bg-elevated, #1f1f1f)',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      boxShadow: '0 12px 32px rgba(0,0,0,.32)',
+      padding: '12px 14px',
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+    }
+    const dockHeadStyle = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }
+    const dockTitleStyle = { flex: 1, margin: 0, fontSize: 12, fontWeight: 600 }
+    const dockThumbStyle = {
+      maxWidth: '100%',
+      maxHeight: 160,
+      borderRadius: 8,
+      objectFit: 'contain',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+      display: 'block',
+      marginBottom: 8,
+    }
+    const dockCloseStyle = {
+      ...resetStyle,
+      fontSize: 14,
+      lineHeight: 1,
+      padding: '2px 6px',
+    }
+
+    /**
+     * 对话 composer 级粘贴/拖拽图片捕获。
+     *
+     * 挂在 `conversation.input.dock`（session 级，composer 卡片上方一整行）——但**渲染
+     * 零 inline 占位**：所有可见输出经 createPortal 画到 document.body 上的浮层
+     * （对齐 dsh-ads AdLayer 的 dock+portal 模式：slot 只是带 React 生命周期、且把层
+     * 绑定到 open session 而非泄漏全局）。组件本身：
+     *  - 轮询找到 composer 元素（textarea/contenteditable，取最靠下的、排除对话框内），
+     *    在 capture 阶段拦截 paste/drop——含图片则 preventDefault + stopImmediatePropagation
+     *    赢过原生 composer 的粘贴路径，把图片走 dsh-rider 自建 /understand 路由直抵
+     *    视觉模型（不经 DSH 对话流，绕开 apiproxy 对纯文本模型的图片准入拦截）；
+     *  - 文字粘贴不拦截，正常落入 composer；
+     *  - 切换 session（sessionId 变）重置进行中的任务。
+     * 复用 fileToDataURL / resultBoxStyle / mutedStyle / metaStyle / errorStyle / Button。
+     */
+    function ComposerVisionDock(props) {
+      const sessionId = props && props.sessionId
+      const [composerEl, setComposerEl] = useState(null)
+      const [anchor, setAnchor] = useState(null) // {left, width, bottomGap}
+      const [task, setTask] = useState(null)    // {id, preview?, name?, status, text?, model?, provider?, note?, error?}
+      const reqId = useRef(0)
+
+      /** 找 composer 元素并更新锚点；composer 切换时 reattach（经 composerEl effect）。 */
+      useEffect(() => {
+        let current = null
+        const scan = () => {
+          let best = null
+          let bestTop = -Infinity
+          const inputs = document.querySelectorAll('textarea, [contenteditable="true"]')
+          for (const node of inputs) {
+            // 排除设置/弹窗内的输入（settings 卡片自有 paste），排除自身浮层
+            if (node.closest('[role="dialog"]')) continue
+            if (node.closest('[data-dsh-rider-vision-overlay]')) continue
+            const rect = node.getBoundingClientRect()
+            if (rect.height === 0) continue
+            if (rect.top > bestTop) { bestTop = rect.top; best = node }
+          }
+          if (best !== current) { current = best; setComposerEl(best) }
+          if (best) {
+            const r = best.getBoundingClientRect()
+            setAnchor({ left: r.left, width: r.width, bottomGap: window.innerHeight - r.top })
+          }
+        }
+        scan()
+        const timer = setInterval(scan, 1500)
+        const onResize = () => scan()
+        window.addEventListener('resize', onResize)
+        return () => {
+          clearInterval(timer)
+          window.removeEventListener('resize', onResize)
+        }
+      }, [sessionId])
+
+      /** paste/drop 挂到 composer 元素；capture 阶段拦截图片，赢过原生粘贴路径。 */
+      useEffect(() => {
+        if (!composerEl) return
+        const takeImage = (file) => {
+          if (!file || !file.type || !file.type.startsWith('image/')) return false
+          void runUnderstand(file)
+          return true
+        }
+        const onPaste = (e) => {
+          if (!composerVisionStore.getEnabled()) return
+          const items = e.clipboardData && e.clipboardData.items
+          if (!items) return
+          for (const item of items) {
+            if (item.type && item.type.startsWith('image/')) {
+              const file = item.getAsFile && item.getAsFile()
+              if (file && takeImage(file)) {
+                e.preventDefault()
+                e.stopPropagation()
+                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
+                break
+              }
+            }
+          }
+        }
+        const onDrop = (e) => {
+          if (!composerVisionStore.getEnabled()) return
+          const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
+          if (file && takeImage(file)) {
+            e.preventDefault()
+            e.stopPropagation()
+          }
+        }
+        const onDragOver = (e) => {
+          if (!composerVisionStore.getEnabled()) return
+          const types = e.dataTransfer && e.dataTransfer.types
+          if (types && Array.from(types).indexOf('Files') >= 0) e.preventDefault()
+        }
+        composerEl.addEventListener('paste', onPaste, true)
+        composerEl.addEventListener('drop', onDrop, false)
+        composerEl.addEventListener('dragover', onDragOver, false)
+        return () => {
+          composerEl.removeEventListener('paste', onPaste, true)
+          composerEl.removeEventListener('drop', onDrop, false)
+          composerEl.removeEventListener('dragover', onDragOver, false)
+        }
+      }, [composerEl])
+
+      /** 切换 session：作废进行中的任务并清空浮层。 */
+      useEffect(() => {
+        reqId.current += 1
+        setTask(null)
+      }, [sessionId])
+
+      /** 把图片走 dsh-rider 自建 /understand 路由；reqId 防陈旧结果覆盖。 */
+      async function runUnderstand(file) {
+        const myId = (reqId.current += 1)
+        let previewUrl = null
+        try {
+          previewUrl = await fileToDataURL(file)
+        } catch {
+          previewUrl = null
+        }
+        if (reqId.current !== myId) return
+        setTask({ id: myId, preview: previewUrl, name: file.name, status: 'busy' })
+        try {
+          const response = await fetch('/api/dsh-rider-vision/understand', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ image: previewUrl || '' }),
+          })
+          const body = await response.json()
+          if (reqId.current !== myId) return
+          if (!body || body.ok !== true) throw new Error((body && body.message) || t('composerFailed'))
+          setTask({
+            id: myId, preview: previewUrl, name: file.name, status: 'done',
+            text: body.text, model: body.model, provider: body.provider, note: body.note,
+          })
+        } catch (error) {
+          if (reqId.current !== myId) return
+          setTask({
+            id: myId, preview: previewUrl, name: file.name, status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+
+      const onClose = useCallback(() => {
+        reqId.current += 1
+        setTask(null)
+      }, [])
+      const onCopy = useCallback(async () => {
+        if (!task || !task.text) return
+        try { await navigator.clipboard.writeText(task.text) } catch {
+          // 复制失败静默
+        }
+      }, [task])
+
+      if (!task) return null
+
+      const cardStyle = Object.assign({}, dockCardStyle)
+      if (anchor) {
+        cardStyle.left = Math.max(8, anchor.left)
+        cardStyle.width = Math.min(Math.max(280, anchor.width), 460)
+        cardStyle.bottom = Math.max(8, anchor.bottomGap + 12)
+      } else {
+        cardStyle.right = 16
+        cardStyle.bottom = 16
+        cardStyle.width = 360
+      }
+
+      return createPortal(
+        h('div', { style: cardStyle, 'data-dsh-rider-vision-overlay': 'true' },
+          h('div', { style: dockHeadStyle },
+            h('span', { style: dockTitleStyle }, t('composerTitle')),
+            h('button', { type: 'button', onClick: onClose, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
+          ),
+          task.preview
+            ? h('img', { src: task.preview, alt: task.name || '', style: dockThumbStyle })
+            : null,
+          task.status === 'busy'
+            ? h('p', { style: mutedStyle }, t('imageUnderstanding'))
+            : null,
+          task.status === 'error'
+            ? h('p', { style: errorStyle }, t('composerFailed') + (task.error ? '\uff1a' + task.error : ''))
+            : null,
+          task.status === 'done'
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                  h('span', { style: metaStyle }, task.provider + '/' + task.model),
+                  h(Button, { variant: 'ghost', size: 'sm', onClick: onCopy }, t('imageCopy')),
+                ),
+                h('pre', { style: resultBoxStyle }, task.text),
+                task.note ? h('p', { style: mutedStyle }, task.note) : null,
+              )
+            : null,
+        ),
+        document.body,
+      )
+    }
+
+    /**
+     * 设置页内「对话粘贴捕获」开关：勾选即写 localStorage（默认开）。订阅
+     * composerVisionStore 刷新勾选态。dsh-ads 式自包含——不接 props，零 namespace 门槛。
+     */
+    function ComposerCaptureToggleCard() {
+      const [enabled, setEnabled] = useState(composerVisionStore.getEnabled())
+      useEffect(() => composerVisionStore.subscribe(() => setEnabled(composerVisionStore.getEnabled())), [])
+      const onToggle = (e) => composerVisionStore.setEnabled(e && e.target && e.target.checked)
+      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
+        h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8 } },
+          h('input', {
+            type: 'checkbox',
+            checked: enabled,
+            onChange: onToggle,
+            style: {
+              marginTop: 4,
+              width: 16, height: 16,
+              accentColor: 'var(--dsh-alias-accent-primary, #4f9eff)',
+              cursor: 'pointer',
+            },
+          }),
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0 }) }, t('composerCaptureToggle')),
+            h('p', { style: hintStyle }, t('composerCaptureHint')),
+          ),
+        ),
+      )
+    }
+
     /**
      * 图片理解卡片：粘贴/拖拽/上传图片 → 预览 → POST /understand → 显示描述。
      * 经 Node half 自建路由直抵视觉模型，不经 DSH 对话流（绕开图片准入拦截）。
@@ -576,6 +872,8 @@ window.__ModuleLoader__.load({
             state.failed ? h('p', { style: errorStyle }, t('saveFailed')) : null,
           ),
         ),
+        // 对话粘贴捕获开关（写 localStorage；dock 组件读同一 store）
+        h(ComposerCaptureToggleCard),
         // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）
         h(ImageUnderstandCard),
       )
@@ -601,6 +899,16 @@ window.__ModuleLoader__.load({
           label: () => 'dsh-rider',
           inject: () => (controller ? controller.inject() : {}),
         }, RiderVisionPage))
+      // 对话 composer 级粘贴/拖拽图片捕获：dock 挂空组件（渲染靠 portal），复用
+      // 已有的 /api/dsh-rider-vision/understand 路由，图片不走 DSH 对话流（绕开
+      // apiproxy 对纯文本模型的图片准入拦截）。对齐 dsh-ads AdLayer 的 dock+portal 模式。
+      ctx.slots.inject('conversation.input.dock', () =>
+        ctx.slots.register({
+          name: 'conversation.input.dock',
+          id: 'dsh-rider-composer-vision',
+          order: 60,
+          inject: () => ({}),
+        }, ComposerVisionDock))
     }
 
     exports.name = 'dsh-rider'

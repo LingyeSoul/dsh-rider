@@ -105,6 +105,22 @@ dsh-rider 设置页提供「图片理解」卡片，**绕开对话流**直接看
 
 > 技术细节见决策记录 `decisions/implemented/2026-08-15-image-understand-card.md`。
 
+## 对话输入框粘贴图片捕获
+
+「图片理解」卡片要切到设置页才能粘贴。dsh-rider 还在**对话输入框**直接装了捕获：
+在 composer 里 Ctrl+V 粘贴（或拖入）图片 → dsh-rider 直接把图片发给视觉模型 → 描述
+显示在输入框上方的浮层（含模型元信息 + 复制）。图片**不作为消息附件发送**，因此绕开
+DSH 对纯文本会话模型的图片准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAGES`）——纯文本模型下
+也能在对话里顺手粘贴看图，无需切设置页。
+
+- 默认开。若会话模型支持图片、想用原生「粘贴即附件」，在 **设置 → dsh-rider** 页关闭
+  「在对话输入框捕获粘贴/拖拽的图片」即可（状态持久化到本机）。
+- 复用同一个 `/api/dsh-rider-vision/understand` 路由与视觉调用逻辑，模型选择优先级
+  与 `vision_understand` / 图片理解卡片一致（工具参数 > settings > 自动发现）。
+- 文字粘贴不被拦截，正常落入输入框；含图片的粘贴才走视觉路由。
+
+> 技术细节见决策记录 `decisions/implemented/2026-08-15-composer-paste-vision-dock.md`。
+
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /
@@ -220,8 +236,9 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间 + `/api/dsh-rider-vision` 配置读写路由）；`client/index.js` =
-  client half（设置导航的 dsh-rider 独立设置页，CJS 源码即产物，零构建链）；
+  settings 命名空间 + `/api/dsh-rider-vision` 配置读写 + 图片理解路由）；`client/index.js` =
+  client half（`settings.section` 独立设置页 + `conversation.input.dock` 对话粘贴图片
+  捕获，CJS 源码即产物，零构建链）；
   搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闭包）；
   视觉能力全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
   `ctx.agentDefaultModel` / `ctx.webServer`，零新增依赖）。
