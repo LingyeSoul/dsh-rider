@@ -1,0 +1,122 @@
+<h1 align="center">dsh-rider</h1>
+
+<p align="center">
+  DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）。
+  DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
+  自动回退 Bing。并注入系统提示指引让 agent 优先使用它（内置 deepseek 网页搜索仅作最终后备）。
+</p>
+
+## 能力面
+
+### Tools
+
+| 工具 | 说明 |
+|---|---|
+| `duckduckgo_search` | 免费网络搜索：DuckDuckGo（[ddg-kit](https://github.com/lennney/ddg-kit)）优先，失败自动回退 Bing；返回标题/URL/摘要列表，`engine` 字段标明实际来源 |
+
+### MCP servers
+
+无（v0.1 的 duckduckgo-mcp-server 已因 VQD 失败被原生工具替换，见决策记录
+`decisions/implemented/2026-08-14-native-ddg-kit-tool.md`）。
+
+### Skills
+
+当前无 skill；仓库按多能力插件规划，后续能力以 SKILL.md 模式在 `skills/` 扩展。
+
+## 搜索工具选择（系统提示指引）
+
+内置 `web_search`（deepseek 网页搜索）会在系统提示中指示 agent 使用它。本插件
+注入更高优先级的指引（`tool:duckduckgo` 段，order 115 > 内置的 110）：
+**网络搜索优先使用 `duckduckgo_search`，内置 `web_search` 仅作最终后备**。
+
+想关闭指引（恢复默认选择行为）：profile 层禁用 `dsh-rider` 条目，见「启停与配置覆盖」。
+
+## 网络与代理（重要）
+
+ddg-kit 本身忽略系统代理，本插件代为读取。
+
+代理解析优先级：
+
+1. `DUCKDUCKGO_PROXY_URL` 环境变量（dsh web 进程环境，ddg-kit 原生支持）；
+2. Windows 系统代理（注册表 `HKCU\...\Internet Settings`，缓存 60s；非 Windows 平台无此项）；
+3. 直连（无代理时）。
+
+DuckDuckGo 经代理偶发风控（BOT_CHALLENGE）：插件按冷却等待后自动重试一次，
+仍失败则回退 Bing（Bing 在本网络直连稳定，无需代理）。
+
+## 安装
+
+官方 bundle 插件，经 web profile 层栈安装（装完**重启 web**；依赖 ddg-kit 随包自动安装）：
+
+```sh
+# git 源（推荐，一行安装）
+dsh plugin --profile web add "github:LingyeSoul/dsh-rider#main"
+
+# 或本地目录（在包目录内执行，dsh 锚定 . 为绝对路径）
+cd dsh-rider
+dsh plugin --profile web add .
+```
+
+更新到新版本：`dsh plugin --profile web update dsh-rider` 后重启 web。
+卸载：`dsh plugin --profile web remove dsh-rider` 后重启 web。
+
+## 使用
+
+安装后对话中直接让 agent「搜索一下 XXX」，agent 会优先调用 `duckduckgo_search`：
+
+```
+工具：duckduckgo_search
+参数：
+  query      (必填) 搜索词，最长 400 字符
+  count      (可选) 结果条数 1-20，默认 10
+  safeSearch (可选) strict / moderate / off，默认 moderate
+```
+
+返回结构：`{ engine: duckduckgo | bing, noResults, results: [{title, url, description, hostname}] }`
+（`engine` 标明实际使用哪个引擎，便于判断 DDG 是否可用）。
+
+示例输出：
+
+```
+引擎：duckduckgo，共 10 条结果
+1. 张雪峰（教育博主、学业职业规划讲师）— 百度百科
+   https://baike.baidu.com/item/...
+   1984 年 5 月 18 日出生，2007 年从郑州大学毕业后开始北漂生涯……
+2. ...
+```
+
+## 插件管理
+
+已装插件用 plugin-registry 的**薄控制台**管理（浏览器面板）：管理 profile
+插件安装态（bundle 层栈 + insert 行 + 启停），无需手改配置。安装：
+`dsh plugin --profile web add <plugin-registry>/packages/plugin/console`
+
+## 手动 insert 行（免重启备选）
+
+不想装包时，可把下面的行直接追加到 profile 的
+`cordis.patch.yml`（`$DSH_HOME/profiles/web/`），配置 HMR **实时挂载，零重启**
+（需另行安装本包使 `dsh-rider` 可解析，或自行复制 `index.mjs` 的实现）：
+
+```yaml
+- insert:
+    - id: dsh-rider
+      name: 'dsh-rider'
+```
+
+## 启停与配置覆盖
+
+在 profile 层（不是本包内）覆盖，例如禁用整个插件：
+
+```yaml
+- disabled: true
+  id: dsh-rider
+```
+
+## 开发
+
+- 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
+  （`duckduckgo_search` 工具 + 系统提示指引）；搜索实现依赖 `ddg-kit@0.1.1`
+  （声明在 dependencies，随包安装进 profile 闭包）。
+- 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
+  stub 做真实 import 与 apply() 注册形状校验，无需 node_modules）。
+- 决策记录：`decisions/implemented/`。

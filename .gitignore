@@ -1,0 +1,5 @@
+/.npm-tmp
+/decisions
+node_modules/
+*.log
+/.research
