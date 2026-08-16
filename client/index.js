@@ -75,6 +75,30 @@ window.__ModuleLoader__.load({
       imageCopied: 'Copied',
       modelUsed: 'model',
       imageNoModel: 'No vision model configured — set visionProvider/visionModel above, or ensure a provider declares an image-capable model.',
+      composerUploadToggle: 'Capture file drag/paste in the composer (upload)',
+      composerUploadHint: 'When on, dragging or pasting a non-image file into the composer uploads it via dsh-rider and shows a file card above the input — insert the absolute path into your message and the agent reads the file with its own fs/pwsh tools. Images are unaffected (vision capture or native attach).',
+      uploadDirLabel: 'Upload directory',
+      uploadDirHint: 'Where uploaded files are stored. Leave empty for the default (~/.dsh-rider/uploads).',
+      uploadMaxMBLabel: 'Max upload size (MB)',
+      uploadMaxMBHint: 'Per-file size limit; 0 = default (50 MB).',
+      uploadTitle: 'File upload',
+      uploadDescription: 'Drag any non-image file into the composer, or paste a file copied from Explorer — dsh-rider uploads it to the local uploads dir and inserts the absolute path into your message, so the agent reads the file content with its own tools. Images keep their native/vision path.',
+      uploadHint: 'Uploaded files live on this machine (default ~/.dsh-rider/uploads). The message stays plain text — no DSH attachment gate involved.',
+      uploadInsert: 'Insert path',
+      uploadInserted: 'Inserted',
+      uploadCopyPath: 'Copy path',
+      uploadCopied: 'Copied',
+      uploadDelete: 'Delete',
+      uploadDeleteFailed: 'Delete failed',
+      uploadTooLarge: 'File too large',
+      uploadFailed: 'Upload failed',
+      uploading: 'Uploading…',
+      uploadedTitle: 'Uploaded files',
+      uploadedEmpty: 'No uploaded files yet — drag a file into the composer.',
+      uploadedRefresh: 'Refresh',
+      uploadedClear: 'Clear all',
+      uploadedClearing: 'Clearing…',
+      uploadedListFailed: 'Failed to load uploaded files',
       composerCaptureToggle: 'Capture pasted/dropped images in the composer',
       composerCaptureHint: 'When on, pasting or dropping an image into the composer sends it straight to the vision model and shows the description above the input (the image is NOT attached to the message — bypassing DSH\'s image gate on text-only models). Useful for text-only models; turn off to use native paste-to-attach on image-capable models.',
       composerTitle: 'Pasted image \u2192 vision',
@@ -123,6 +147,30 @@ window.__ModuleLoader__.load({
       imageCopied: '已复制',
       modelUsed: '模型',
       imageNoModel: '未配置视觉模型——请在上方填写 visionProvider/visionModel，或确保某提供商声明了支持图片的模型。',
+      composerUploadToggle: '在对话输入框捕获拖拽/粘贴的文件并上传',
+      composerUploadHint: '开启后，在对话输入框拖入或粘贴非图片文件时，dsh-rider 会把文件上传到本机并在输入框上方显示文件卡片——点「插入路径」把绝对路径写进消息，agent 用自己的 fs/pwsh 工具读取内容。图片不受影响（走视觉捕获或原生附件）。',
+      uploadDirLabel: '上传目录',
+      uploadDirHint: '上传文件的存放位置。留空用默认（~/.dsh-rider/uploads）。',
+      uploadMaxMBLabel: '单文件大小上限（MB）',
+      uploadMaxMBHint: '单个文件的大小上限，0 = 默认（50 MB）。',
+      uploadTitle: '文件上传',
+      uploadDescription: '把任意非图片文件拖入对话输入框，或在输入框粘贴（从资源管理器复制的）文件——dsh-rider 把文件上传到本机上传目录，并把绝对路径插入消息，agent 收到后用 fs/pwsh 工具直接读文件内容。图片保持原行为（视觉捕获或原生附件）。',
+      uploadHint: '上传文件保存在本机（默认 ~/.dsh-rider/uploads）。消息保持纯文本——不触发 DSH 的附件准入拦截。',
+      uploadInsert: '插入路径',
+      uploadInserted: '已插入',
+      uploadCopyPath: '复制路径',
+      uploadCopied: '已复制',
+      uploadDelete: '删除',
+      uploadDeleteFailed: '删除失败',
+      uploadTooLarge: '文件过大',
+      uploadFailed: '上传失败',
+      uploading: '上传中…',
+      uploadedTitle: '已上传文件',
+      uploadedEmpty: '还没有上传的文件——把文件拖入对话输入框即可上传。',
+      uploadedRefresh: '刷新',
+      uploadedClear: '全部清除',
+      uploadedClearing: '清除中…',
+      uploadedListFailed: '读取已上传文件失败',
       composerCaptureToggle: '在对话输入框捕获粘贴/拖拽的图片',
       composerCaptureHint: '开启后，在对话输入框粘贴或拖入图片时，dsh-rider 会直接把图片发给视觉模型并在输入框上方显示描述（图片不会作为消息附件发送，绕开 DSH 对纯文本模型的图片拦截）。纯文本会话模型适用；若会话模型支持图片且想用原生粘贴附件，请关闭此项。',
       composerTitle: '粘贴图片 \u2192 视觉理解',
@@ -149,7 +197,7 @@ window.__ModuleLoader__.load({
 
     /** 内部标记：该字段将清除（re-inherit composition layer）。 */
     const CLEAR = '\u0000clear'
-    const FIELDS = ['visionProvider', 'visionModel', 'visionPrompt']
+    const FIELDS = ['visionProvider', 'visionModel', 'visionPrompt', 'uploadDir', 'uploadMaxBytes']
 
     function isRecord(value) {
       return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -180,11 +228,15 @@ window.__ModuleLoader__.load({
         void this.refresh()
       }
 
-      /** 一个字段的控件状态：草稿文本、保存后是否覆盖、是否非法（文本字段恒合法）。 */
+      /** 一个字段的控件状态：草稿文本、保存后是否覆盖、是否非法（文本字段恒合法）。
+       *  uploadMaxBytes 的 resolved 0 = 默认，显示为空文本。 */
       fieldState(field) {
         const draft = this.drafts[field]
         const hasDraft = draft !== undefined
-        const resolvedText = String(this.resolved[field] ?? '')
+        const resolvedRaw = this.resolved[field]
+        const resolvedText = field === 'uploadMaxBytes' && Number(resolvedRaw) <= 0
+          ? ''
+          : String(resolvedRaw ?? '')
         const text = hasDraft ? (draft === CLEAR ? '' : draft) : resolvedText
         const overridden = hasDraft ? draft !== CLEAR && draft !== '' : field in this.user
         return { text, overridden, invalid: false }
@@ -201,6 +253,8 @@ window.__ModuleLoader__.load({
           visionProvider: this.fieldState('visionProvider'),
           visionModel: this.fieldState('visionModel'),
           visionPrompt: this.fieldState('visionPrompt'),
+          uploadDir: this.fieldState('uploadDir'),
+          uploadMaxBytes: this.fieldState('uploadMaxBytes'),
         }
       }
 
@@ -441,6 +495,59 @@ window.__ModuleLoader__.load({
       },
     }
 
+    /** 「对话文件上传」开关，localStorage 持久化（默认开）。与图片视觉捕获独立——
+     *  图片走 composerVisionStore（视觉理解或原生附件），非图片文件走本开关（上传+路径）。 */
+    const composerUploadState = { enabled: true, listeners: new Set() }
+    try {
+      if (localStorage.getItem('dsh-rider.composerUpload') === 'off') composerUploadState.enabled = false
+    } catch {
+      // vm 沙箱 / 无 localStorage 环境：保持默认开
+    }
+    const composerUploadStore = {
+      getEnabled: () => composerUploadState.enabled,
+      setEnabled: (value) => {
+        composerUploadState.enabled = !!value
+        try {
+          localStorage.setItem('dsh-rider.composerUpload', composerUploadState.enabled ? 'on' : 'off')
+        } catch {
+          // 持久化失败不阻断（内存态仍生效）
+        }
+        for (const listener of [...composerUploadState.listeners]) listener()
+      },
+      subscribe: (listener) => {
+        composerUploadState.listeners.add(listener)
+        return () => composerUploadState.listeners.delete(listener)
+      },
+    }
+
+    /** 文件大小人类可读格式（KB/MB/GB）。 */
+    function formatBytes(bytes) {
+      const n = Number(bytes)
+      if (!Number.isFinite(n) || n < 0) return ''
+      if (n < 1024) return `${n} B`
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+      if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+      return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+    }
+
+    /** 把文本插入受控 textarea（React 合成事件经 input 事件驱动），保持光标。 */
+    function insertIntoTextarea(el, text) {
+      if (!el || typeof text !== 'string') return false
+      try {
+        const start = typeof el.selectionStart === 'number' ? el.selectionStart : (el.value || '').length
+        const end = typeof el.selectionEnd === 'number' ? el.selectionEnd : start
+        const next = (el.value || '').slice(0, start) + text + (el.value || '').slice(end)
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+        if (typeof setter === 'function') setter.call(el, next)
+        else el.value = next
+        el.setSelectionRange?.(start + text.length, start + text.length)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      } catch {
+        return false
+      }
+    }
+
     /** dock 结果卡样式：position: fixed，锚在 composer 上方（fallback 右下角）。 */
     const dockCardStyle = {
       position: 'fixed',
@@ -475,16 +582,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 对话 composer 级粘贴/拖拽图片捕获。
+     * 对话 composer 级粘贴/拖拽捕获（图片 → 视觉理解；非图片文件 → 上传 + 路径引用）。
      *
      * 挂在 `conversation.input.dock`（session 级，composer 卡片上方一整行）——但**渲染
      * 零 inline 占位**：所有可见输出经 createPortal 画到 document.body 上的浮层
      * （对齐 dsh-ads AdLayer 的 dock+portal 模式：slot 只是带 React 生命周期、且把层
      * 绑定到 open session 而非泄漏全局）。组件本身：
      *  - 轮询找到 composer 元素（textarea/contenteditable，取最靠下的、排除对话框内），
-     *    在 capture 阶段拦截 paste/drop——含图片则 preventDefault + stopImmediatePropagation
-     *    赢过原生 composer 的粘贴路径，把图片走 dsh-rider 自建 /understand 路由直抵
-     *    视觉模型（不经 DSH 对话流，绕开 apiproxy 对纯文本模型的图片准入拦截）；
+     *    在 capture 阶段拦截 paste；drop/dragover 挂 document capture——capture 先于
+     *    InputBar 的 document bubble listener，且只有「composer 范围内」（composedPath
+     *    含 composerEl，或其祖先 contains composerEl）的文件拖拽才处理，设置页/弹窗的
+     *    拖放完全放行：
+     *      - 图片 → 视觉理解（composerVisionStore 开关；开启则 preventDefault 赢过原生
+     *        粘贴/拖放路径，关闭则放行给原生图片附件）；
+     *      - 非图片文件 → 上传（composerUploadStore 开关）到 Node half 的
+     *        /api/dsh-rider-upload 路由，浮层文件卡片可「插入路径」（绝对路径写进
+     *        composer，消息纯文本，agent 用 fs/pwsh 工具读文件）/「复制路径」/「删除」。
      *  - 文字粘贴不拦截，正常落入 composer；
      *  - 切换 session（sessionId 变）重置进行中的任务。
      * 复用 fileToDataURL / resultBoxStyle / mutedStyle / metaStyle / errorStyle / Button。
@@ -493,7 +606,9 @@ window.__ModuleLoader__.load({
       const sessionId = props && props.sessionId
       const [composerEl, setComposerEl] = useState(null)
       const [anchor, setAnchor] = useState(null) // {left, width, bottomGap}
-      const [task, setTask] = useState(null)    // {id, preview?, name?, status, text?, model?, provider?, note?, error?}
+      const [task, setTask] = useState(null)    // 视觉任务 {id, preview?, name?, status, text?, model?, provider?, note?, error?}
+      const [uploads, setUploads] = useState([]) // 上传任务 {id, file, status, path?, size?, error?, tooLarge?}
+      const [insertedId, setInsertedId] = useState(null)
       const reqId = useRef(0)
 
       /** 找 composer 元素并更新锚点；composer 切换时 reattach（经 composerEl effect）。 */
@@ -527,57 +642,90 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
-      /** paste/drop 挂到 composer 元素；capture 阶段拦截图片，赢过原生粘贴路径。 */
-      useEffect(() => {
-        if (!composerEl) return
-        const takeImage = (file) => {
-          if (!file || !file.type || !file.type.startsWith('image/')) return false
+      /** 事件是否落在 composer 范围内：composedPath 含 composerEl，或某祖先 contains 它
+       *  （拖到 composer 卡片空白/附件栏也算；设置页/弹窗的路径不含 composerEl，放行）。 */
+      const isComposerEvent = (e) => {
+        if (!composerEl) return false
+        const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target]
+        return path.some((node) => node === composerEl ||
+          (node && typeof node.contains === 'function' && node.contains(composerEl)))
+      }
+
+      /** 分发文件：图片 → 视觉理解（开关）；非图片 → 上传（开关）。返回是否已接管。 */
+      const takeFile = (file) => {
+        if (!file) return false
+        if (file.type && file.type.startsWith('image/')) {
+          if (!composerVisionStore.getEnabled()) return false
           void runUnderstand(file)
           return true
         }
+        if (!composerUploadStore.getEnabled()) return false
+        void runUpload(file)
+        return true
+      }
+
+      /** paste（capture，composerEl 上）+ drop/dragover（document capture，先于 InputBar
+       *  的 document bubble）拦截；命中即 preventDefault + stopImmediatePropagation。 */
+      useEffect(() => {
+        if (!composerEl) return
         const onPaste = (e) => {
-          if (!composerVisionStore.getEnabled()) return
           const items = e.clipboardData && e.clipboardData.items
           if (!items) return
+          let took = false
           for (const item of items) {
-            if (item.type && item.type.startsWith('image/')) {
-              const file = item.getAsFile && item.getAsFile()
-              if (file && takeImage(file)) {
-                e.preventDefault()
-                e.stopPropagation()
-                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
-                break
-              }
-            }
+            if (!item.kind || item.kind !== 'file') continue
+            const file = item.getAsFile && item.getAsFile()
+            if (file && takeFile(file)) { took = true; break }
+          }
+          if (took) {
+            e.preventDefault()
+            e.stopPropagation()
+            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
           }
         }
         const onDrop = (e) => {
-          if (!composerVisionStore.getEnabled()) return
-          const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
-          if (file && takeImage(file)) {
+          if (!isComposerEvent(e)) return
+          const files = e.dataTransfer && e.dataTransfer.files
+          if (!files || files.length === 0) return
+          let took = false
+          let tookImage = false
+          for (const file of Array.from(files)) {
+            if (file.type && file.type.startsWith('image/')) {
+              // 多图只处理第一张（保持单图视觉路径），非图片文件逐个上传
+              if (tookImage) continue
+              if (takeFile(file)) { took = true; tookImage = true }
+            } else if (takeFile(file)) {
+              took = true
+            }
+          }
+          if (took) {
             e.preventDefault()
             e.stopPropagation()
+            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
           }
         }
         const onDragOver = (e) => {
-          if (!composerVisionStore.getEnabled()) return
+          if (!isComposerEvent(e)) return
           const types = e.dataTransfer && e.dataTransfer.types
           if (types && Array.from(types).indexOf('Files') >= 0) e.preventDefault()
         }
         composerEl.addEventListener('paste', onPaste, true)
-        composerEl.addEventListener('drop', onDrop, false)
-        composerEl.addEventListener('dragover', onDragOver, false)
+        document.addEventListener('drop', onDrop, true)
+        document.addEventListener('dragover', onDragOver, true)
         return () => {
           composerEl.removeEventListener('paste', onPaste, true)
-          composerEl.removeEventListener('drop', onDrop, false)
-          composerEl.removeEventListener('dragover', onDragOver, false)
+          document.removeEventListener('drop', onDrop, true)
+          document.removeEventListener('dragover', onDragOver, true)
         }
-      }, [composerEl])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [composerEl, sessionId])
 
       /** 切换 session：作废进行中的任务并清空浮层。 */
       useEffect(() => {
         reqId.current += 1
         setTask(null)
+        setUploads([])
+        setInsertedId(null)
       }, [sessionId])
 
       /** 把图片走 dsh-rider 自建 /understand 路由；reqId 防陈旧结果覆盖。 */
@@ -613,10 +761,85 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const onClose = useCallback(() => {
-        reqId.current += 1
-        setTask(null)
-      }, [])
+      /** 把非图片文件二进制 POST 到 /api/dsh-rider-upload；reqId 防陈旧结果覆盖。
+       *  成功返回绝对路径（file.path），agent 用 fs/pwsh 工具直接读。 */
+      async function runUpload(file) {
+        const myId = (reqId.current += 1)
+        setUploads((prev) => [...prev, { id: myId, file, status: 'busy' }])
+        try {
+          const bytes = await file.arrayBuffer()
+          const response = await fetch('/api/dsh-rider-upload', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/octet-stream',
+              'x-file-name': encodeURIComponent(String(file.name || 'file')),
+              'x-file-type': String(file.type || 'application/octet-stream'),
+            },
+            body: bytes,
+          })
+          let body = {}
+          try { body = await response.json() } catch { body = {} }
+          if (reqId.current !== myId) return
+          if (!body || body.ok !== true) {
+            setUploads((prev) => prev.map((u) => u.id === myId ? {
+              ...u,
+              status: 'error',
+              tooLarge: response.status === 413,
+              error: (body && body.message) || t('uploadFailed'),
+            } : u))
+            return
+          }
+          setUploads((prev) => prev.map((u) => u.id === myId ? {
+            ...u,
+            status: 'done',
+            path: body.file && body.file.path,
+            size: body.file && body.file.size,
+          } : u))
+        } catch (error) {
+          if (reqId.current !== myId) return
+          setUploads((prev) => prev.map((u) => u.id === myId ? {
+            ...u,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          } : u))
+        }
+      }
+
+      /** 把上传文件的绝对路径插入 composer（React 受控 textarea 经 input 事件驱动）。 */
+      const insertPath = useCallback((uploadId) => {
+        const entry = uploads.find((u) => u.id === uploadId)
+        if (!entry || !entry.path) return
+        if (insertIntoTextarea(composerEl, entry.path)) {
+          setInsertedId(uploadId)
+          setTimeout(() => setInsertedId((prev) => prev === uploadId ? null : prev), 1600)
+        }
+      }, [uploads, composerEl])
+
+      /** 复制上传文件的绝对路径到剪贴板。 */
+      const copyUploadPath = useCallback(async (uploadId) => {
+        const entry = uploads.find((u) => u.id === uploadId)
+        if (!entry || !entry.path) return
+        try { await navigator.clipboard.writeText(entry.path) } catch {
+          // 复制失败静默
+        }
+      }, [uploads])
+
+      /** 服务端删除上传文件并从浮层移除。 */
+      const removeUpload = useCallback(async (uploadId) => {
+        const entry = uploads.find((u) => u.id === uploadId)
+        setUploads((prev) => prev.filter((u) => u.id !== uploadId))
+        if (!entry || !entry.path) return
+        try {
+          await fetch('/api/dsh-rider-upload', {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id: entry.id }),
+          })
+        } catch {
+          // 删除失败静默（本地条目已移除）
+        }
+      }, [uploads])
+
       const onCopy = useCallback(async () => {
         if (!task || !task.text) return
         try { await navigator.clipboard.writeText(task.text) } catch {
@@ -624,7 +847,7 @@ window.__ModuleLoader__.load({
         }
       }, [task])
 
-      if (!task) return null
+      if (!task && uploads.length === 0) return null
 
       const cardStyle = Object.assign({}, dockCardStyle)
       if (anchor) {
@@ -637,22 +860,45 @@ window.__ModuleLoader__.load({
         cardStyle.width = 360
       }
 
+      const uploadFileRowStyle = {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: '8px 0',
+        borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+      }
+      const uploadRowHeadStyle = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
+      const uploadNameStyle = { flex: 1, minWidth: 0, margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+      const uploadMetaStyle = { flexShrink: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)' }
+      const uploadPathStyle = {
+        margin: 0,
+        fontSize: 11,
+        color: 'var(--dsw-alias-label-tertiary, inherit)',
+        fontFamily: 'ui-monospace, monospace',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        direction: 'rtl',
+        textAlign: 'left',
+      }
+      const uploadActionsStyle = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }
+
       return createPortal(
         h('div', { style: cardStyle, 'data-dsh-rider-vision-overlay': 'true' },
           h('div', { style: dockHeadStyle },
-            h('span', { style: dockTitleStyle }, t('composerTitle')),
-            h('button', { type: 'button', onClick: onClose, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
+            h('span', { style: dockTitleStyle }, task ? t('composerTitle') : t('uploadTitle')),
+            h('button', { type: 'button', onClick: () => { reqId.current += 1; setTask(null); setUploads([]) }, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
           ),
-          task.preview
+          task && task.preview
             ? h('img', { src: task.preview, alt: task.name || '', style: dockThumbStyle })
             : null,
-          task.status === 'busy'
+          task && task.status === 'busy'
             ? h('p', { style: mutedStyle }, t('imageUnderstanding'))
             : null,
-          task.status === 'error'
+          task && task.status === 'error'
             ? h('p', { style: errorStyle }, t('composerFailed') + (task.error ? '\uff1a' + task.error : ''))
             : null,
-          task.status === 'done'
+          task && task.status === 'done'
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
                   h('span', { style: metaStyle }, task.provider + '/' + task.model),
@@ -662,6 +908,33 @@ window.__ModuleLoader__.load({
                 task.note ? h('p', { style: mutedStyle }, task.note) : null,
               )
             : null,
+          uploads.map((entry) => {
+            const busy = entry.status === 'busy'
+            const done = entry.status === 'done'
+            return h('div', { key: entry.id, style: uploadFileRowStyle },
+              h('div', { style: uploadRowHeadStyle },
+                h('span', { style: { fontSize: 14, flexShrink: 0 } }, '\U0001F4C4'),
+                h('p', { style: uploadNameStyle, title: entry.file && entry.file.name }, entry.file && entry.file.name),
+                h('span', { style: uploadMetaStyle }, busy ? formatBytes(entry.file && entry.file.size) : (done ? formatBytes(entry.size) : '')),
+              ),
+              busy
+                ? h('p', { style: mutedStyle }, t('uploading'))
+                : null,
+              done
+                ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+                    h('p', { style: uploadPathStyle, title: entry.path }, entry.path),
+                    h('div', { style: uploadActionsStyle },
+                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => insertPath(entry.id) }, insertedId === entry.id ? t('uploadInserted') : t('uploadInsert')),
+                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => copyUploadPath(entry.id) }, t('uploadCopyPath')),
+                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => removeUpload(entry.id) }, t('uploadDelete')),
+                    ),
+                  )
+                : null,
+              entry.status === 'error'
+                ? h('p', { style: errorStyle }, (entry.tooLarge ? t('uploadTooLarge') + '\uff1a' : t('uploadFailed') + '\uff1a') + (entry.error || ''))
+                : null,
+            )
+          }),
         ),
         document.body,
       )
@@ -901,6 +1174,148 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 设置页内「对话文件上传」开关：勾选即写 localStorage（默认开）。订阅
+     * composerUploadStore 刷新勾选态。与图片视觉捕获独立（图片归 composerVisionStore）。
+     */
+    function ComposerUploadToggleCard() {
+      const [enabled, setEnabled] = useState(composerUploadStore.getEnabled())
+      useEffect(() => composerUploadStore.subscribe(() => setEnabled(composerUploadStore.getEnabled())), [])
+      const onToggle = (e) => composerUploadStore.setEnabled(e && e.target && e.target.checked)
+      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
+        h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8 } },
+          h('input', {
+            type: 'checkbox',
+            checked: enabled,
+            onChange: onToggle,
+            style: {
+              marginTop: 4,
+              width: 16, height: 16,
+              accentColor: 'var(--dsh-alias-accent-primary, #4f9eff)',
+              cursor: 'pointer',
+            },
+          }),
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0 }) }, t('composerUploadToggle')),
+            h('p', { style: hintStyle }, t('composerUploadHint')),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * 设置页「已上传文件」管理卡片：GET /api/dsh-rider-upload 列出本机已上传文件
+     * （名称/大小/时间/绝对路径），支持复制路径、单删、全部清除、刷新。上传目录与
+     * 大小上限在上方表单配置（uploadDir / uploadMaxBytes）。
+     */
+    function UploadedFilesCard() {
+      const [files, setFiles] = useState(null) // null = loading
+      const [error, setError] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [copiedId, setCopiedId] = useState(null)
+      const [failedId, setFailedId] = useState(null)
+
+      const refresh = async () => {
+        setError(null)
+        try {
+          const r = await fetch('/api/dsh-rider-upload', { headers: { accept: 'application/json' } })
+          const body = await r.json()
+          if (body && body.ok === true) setFiles(Array.isArray(body.files) ? body.files : [])
+          else setError((body && body.message) || t('uploadedListFailed'))
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      }
+      useEffect(() => { void refresh() }, [])
+
+      const onDelete = async (id) => {
+        if (busy) return
+        setBusy(true); setFailedId(null)
+        try {
+          const r = await fetch('/api/dsh-rider-upload', {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id }),
+          })
+          const body = await r.json()
+          if (!body || body.ok !== true) setFailedId(id)
+          else setFiles((prev) => (prev || []).filter((f) => f.id !== id))
+        } catch {
+          setFailedId(id)
+        }
+        setBusy(false)
+      }
+
+      const onClear = async () => {
+        if (busy) return
+        setBusy(true); setError(null)
+        try {
+          const r = await fetch('/api/dsh-rider-upload', {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ clear: true }),
+          })
+          const body = await r.json()
+          if (!body || body.ok !== true) setError((body && body.message) || t('uploadDeleteFailed'))
+          else setFiles([])
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+        setBusy(false)
+      }
+
+      const onCopy = async (path, id) => {
+        try {
+          await navigator.clipboard.writeText(path)
+          setCopiedId(id)
+          setTimeout(() => setCopiedId((prev) => prev === id ? null : prev), 1600)
+        } catch {
+          // 复制失败静默
+        }
+      }
+
+      const fileListStyle = { display: 'flex', flexDirection: 'column', gap: 8 }
+      const fileItemStyle = {
+        display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
+        padding: '8px 10px',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+        borderRadius: 8,
+      }
+      const fileItemMainStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }
+      const fileItemNameStyle = { margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+      const fileItemMetaStyle = { margin: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left', fontFamily: 'ui-monospace, monospace' }
+
+      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0, flex: 1 }) }, t('uploadedTitle')),
+          h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: refresh }, t('uploadedRefresh')),
+          h(Button, { variant: 'outline', size: 'sm', disabled: busy || !Array.isArray(files) || files.length === 0, onClick: onClear },
+            busy ? t('uploadedClearing') : t('uploadedClear')),
+        ),
+        error ? h('p', { style: errorStyle }, error) : null,
+        files === null
+          ? h('p', { style: mutedStyle }, t('loading'))
+          : files.length === 0
+            ? h('p', { style: mutedStyle }, t('uploadedEmpty'))
+            : h('div', { style: fileListStyle },
+                files.map((file) => h('div', { key: file.id, style: fileItemStyle },
+                  h('span', { style: { fontSize: 14, flexShrink: 0 } }, '\U0001F4C4'),
+                  h('div', { style: fileItemMainStyle },
+                    h('p', { style: fileItemNameStyle, title: file.name },
+                      `${file.name} \u00b7 ${formatBytes(file.size)} \u00b7 ${new Date(file.createdAt).toLocaleString()}`),
+                    h('p', { style: fileItemMetaStyle, title: file.path }, file.path),
+                  ),
+                  h(Button, { variant: 'ghost', size: 'sm', onClick: () => onCopy(file.path, file.id) },
+                    copiedId === file.id ? t('uploadCopied') : t('uploadCopyPath')),
+                  h(Button, {
+                    variant: 'ghost', size: 'sm', disabled: busy,
+                    onClick: () => onDelete(file.id),
+                  }, failedId === file.id ? t('uploadDeleteFailed') : t('uploadDelete')),
+                )),
+              ),
+      )
+    }
+
     function fieldRow(field, label, hint, state, disabled, actions) {
       return h(
         'div', { key: field, style: fieldStyle },
@@ -949,6 +1364,8 @@ window.__ModuleLoader__.load({
         ['visionProvider', t('visionProvider'), t('visionProviderHint')],
         ['visionModel', t('visionModel'), t('visionModelHint')],
         ['visionPrompt', t('visionPrompt'), t('visionPromptHint')],
+        ['uploadDir', t('uploadDirLabel'), t('uploadDirHint')],
+        ['uploadMaxBytes', t('uploadMaxMBLabel'), t('uploadMaxMBHint')],
       ]
       return h(
         'div', { style: pageStyle },
@@ -981,6 +1398,10 @@ window.__ModuleLoader__.load({
         h(DeclareImageCard),
         // 对话粘贴捕获开关（写 localStorage；dock 组件读同一 store）
         h(ComposerCaptureToggleCard),
+        // 对话文件上传开关（写 localStorage；dock 组件读同一 store）
+        h(ComposerUploadToggleCard),
+        // 已上传文件管理（列表/复制路径/删除/清空）
+        h(UploadedFilesCard),
         // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）
         h(ImageUnderstandCard),
       )

@@ -17,8 +17,10 @@
  * entry 门禁在仓库无 node_modules 时临时生成 ddg-kit / @deepseek-ai/dsh-tools
  * 的 stub 用于 import 与 apply() 校验，校验后删除（node_modules/ 已 gitignore）。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 
@@ -251,7 +253,7 @@ const DSH_LLM_STUB_JS = "export function createUserMessage(input) { return { id:
 const DSH_SETTINGS_STUB_PKG = '{"name":"@deepseek-ai/dsh-settings","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const DSH_SETTINGS_STUB_JS = "export function settingsNamespace(value) { return value; }\n";
 const SCHEMASTERY_STUB_PKG = '{"name":"@deepseek-ai/schemastery","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
-const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nexport default { object: (shape) => ({ __shape: shape }), string };\n";
+const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nconst number = () => ({ __type: 'number' });\nexport default { object: (shape) => ({ __shape: shape }), string, number };\n";
 
 /** 仓库无 node_modules 时生成最小 stub（运行后删除）。 */
 function ensureEntryStubs() {
@@ -642,6 +644,166 @@ const visionExecuteGate = gate(
   },
 );
 
+/* -------------------------- upload-execute 门禁 -------------------------- */
+
+/** 构造 fake IncomingMessage：真实 Readable（缓冲语义，晚注册监听也能收到 body，
+ *  对齐 Node http 请求流的背压行为——不会因 handler 先 await 其他操作而丢 data/end）。 */
+function makeFakeReq(body, method, headers) {
+  const chunk = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
+  const req = Readable.from(chunk);
+  req.method = method;
+  req.headers = headers ?? {};
+  return req;
+}
+
+/** 构造 fake ServerResponse：收集 statusCode / headers / body。 */
+function makeFakeRes() {
+  const res = { statusCode: 200, headers: {}, body: "" };
+  res.setHeader = (key, value) => { res.headers[key] = value; };
+  res.end = (chunk) => { res.body = String(chunk ?? ""); };
+  return res;
+}
+
+/** apply 后捕获 webServer 注册的路由；settings.get 返回给定值（uploadDir 必须显式给临时目录）。 */
+function makeUploadHarness(settingsValue) {
+  const registered = [];
+  const ctx = {
+    effect: (fn) => { fn(); },
+    tools: { register: () => {} },
+    systemPrompt: { section: () => {} },
+    settings: { register: () => ({ get: () => settingsValue ?? {} }) },
+    llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
+    attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
+    agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+    webServer: { register: (route) => { registered.push(route); return () => {}; } },
+  };
+  return { ctx, registered };
+}
+
+/** 取出上传路由 handler；未注册直接抛错。 */
+function uploadHandler(registered) {
+  const route = registered.find((r) => r.path === "/api/dsh-rider-upload");
+  if (!route || typeof route.handler !== "function") throw new Error("upload-execute: 未注册 /api/dsh-rider-upload 路由");
+  return route.handler;
+}
+
+/** 一次调用：返回 {status, body}。 */
+async function callUpload(handler, { method = "POST", body, headers } = {}) {
+  const res = makeFakeRes();
+  await handler(makeFakeReq(body, method, headers), res);
+  let parsed = null;
+  try { parsed = JSON.parse(res.body); } catch {}
+  return { status: res.statusCode, body: parsed, raw: res.body };
+}
+
+const uploadExecuteGate = gate(
+  "upload-execute",
+  async () => {
+    const created = ensureEntryStubs();
+    const tmp = mkdtempSync(join(tmpdir(), "dsh-rider-upload-gate-"));
+    try {
+      const mod = await import(pathToFileURL(join(ROOT, "index.mjs")).href);
+      const problems = [];
+      const settingsValue = { uploadDir: tmp, uploadMaxBytes: 0 };
+      const { ctx, registered } = makeUploadHarness(settingsValue);
+      mod.apply(ctx);
+      const handler = uploadHandler(registered);
+      const enc = encodeURIComponent;
+
+      // 成功路径：中文文件名 + text/plain 内容落盘
+      const hello = Buffer.from("hello from dsh-rider upload gate", "utf8");
+      const up = await callUpload(handler, {
+        method: "POST",
+        body: hello,
+        headers: { "x-file-name": enc("报告.txt"), "x-file-type": "text/plain; charset=utf-8" },
+      });
+      if (up.status !== 200 || up.body?.ok !== true) {
+        problems.push(`上传成功路径失败：HTTP ${up.status} ${up.raw}`);
+      } else {
+        const file = up.body.file;
+        if (file.name !== "报告.txt") problems.push(`上传文件名清洗错误：${file.name}`);
+        if (file.mediaType !== "text/plain") problems.push(`上传 mediaType 错误：${file.mediaType}`);
+        if (file.size !== hello.length) problems.push(`上传 size 错误：${file.size}`);
+        if (!file.path || !file.path.startsWith(tmp)) problems.push(`上传 path 不在 uploadDir：${file.path}`);
+        const stored = readFileSync(file.path);
+        if (!stored.equals(hello)) problems.push("上传落盘内容不一致");
+        if (!existsSync(join(tmp, `${file.id}.meta.json`))) problems.push("上传未写 meta 文件");
+        // 列表
+        const list = await callUpload(handler, { method: "GET" });
+        if (list.status !== 200 || !Array.isArray(list.body?.files) || list.body.files.length !== 1) {
+          problems.push(`列表路径失败：HTTP ${list.status} ${list.raw}`);
+        }
+        // 单删
+        const del = await callUpload(handler, { method: "DELETE", body: JSON.stringify({ id: file.id }), headers: { "content-type": "application/json" } });
+        if (del.status !== 200 || !Array.isArray(del.body?.removed) || del.body.removed[0] !== file.id) {
+          problems.push(`单删路径失败：HTTP ${del.status} ${del.raw}`);
+        }
+        if (existsSync(file.path) || existsSync(join(tmp, `${file.id}.meta.json`))) problems.push("单删未清除磁盘文件");
+        // 清空
+        for (let i = 0; i < 2; i++) {
+          await callUpload(handler, { method: "POST", body: Buffer.from(`file-${i}`), headers: { "x-file-name": enc(`f${i}.txt`) } });
+        }
+        const clear = await callUpload(handler, { method: "DELETE", body: JSON.stringify({ clear: true }), headers: { "content-type": "application/json" } });
+        if (clear.status !== 200 || clear.body?.cleared !== true) problems.push(`清空路径失败：HTTP ${clear.status} ${clear.raw}`);
+        const after = await callUpload(handler, { method: "GET" });
+        if (after.body?.files?.length !== 0) problems.push(`清空后列表非空：${after.raw}`);
+      }
+
+      // 大小上限：1MB 上限拒 2MB
+      const small = makeUploadHarness({ uploadDir: tmp, uploadMaxBytes: 1 });
+      mod.apply(small.ctx);
+      const smallHandler = uploadHandler(small.registered);
+      const tooLarge = await callUpload(smallHandler, {
+        method: "POST",
+        body: Buffer.alloc(2 * 1024 * 1024, 7),
+        headers: { "x-file-name": enc("big.bin") },
+      });
+      if (tooLarge.status !== 413) problems.push(`超限未被 413 拒绝：HTTP ${tooLarge.status} ${tooLarge.raw}`);
+
+      // 非法文件名清洗：路径穿越与 Windows 保留字符
+      const evil = await callUpload(handler, {
+        method: "POST",
+        body: Buffer.from("x"),
+        headers: { "x-file-name": enc("..\\..\\evil:name?.txt") },
+      });
+      if (evil.status !== 200 || evil.body?.file?.name.includes("..") || evil.body?.file?.name.includes(":")) {
+        problems.push(`非法文件名未被清洗：${evil.raw}`);
+      }
+      if (evil.status === 200) {
+        // Windows 盘符路径本身含 ':'，只检查存储名段（目录前缀来自 uploadDir，允许盘符）
+        const storageBase = String(evil.body.file.path).split(/[\\/]/).pop() ?? "";
+        if (storageBase.includes("..") || storageBase.includes(":")) {
+          problems.push(`存储名含分隔符/穿越：${evil.body.file.path}`);
+        }
+      }
+
+      // 空 body 拒绝
+      const empty = await callUpload(handler, { method: "POST", body: Buffer.alloc(0), headers: { "x-file-name": enc("e.txt") } });
+      if (empty.status !== 400) problems.push(`空 body 未被 400 拒绝：HTTP ${empty.status} ${empty.raw}`);
+
+      // 405
+      const badMethod = await callUpload(handler, { method: "PUT", body: "x" });
+      if (badMethod.status !== 405) problems.push(`PUT 未被 405 拒绝：HTTP ${badMethod.status}`);
+
+      return problems;
+    } finally {
+      removeEntryStubs(created);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+  async () => {
+    const problems = [];
+    const res = makeFakeRes();
+    if (res.statusCode !== 200 || typeof res.end !== "function") problems.push("自证失败：fake res 形状错误");
+    const req = makeFakeReq(Buffer.from("hi"), "POST", {});
+    let got = false;
+    req.on("data", (chunk) => { if (Buffer.isBuffer(chunk) && chunk.toString() === "hi") got = true; });
+    await new Promise((resolve2) => { req.on("end", resolve2); });
+    if (!got) problems.push("自证失败：fake req 未推送 body");
+    return problems;
+  },
+);
+
 /* -------------------------- client bundle 门禁 -------------------------- */
 
 const CLIENT_PATH = join(ROOT, "client", "index.js");
@@ -721,6 +883,12 @@ function makeVisionFetchStub() {
         if (method === "GET") return { ok: true, json: async () => ({ ok: true, models: [], visionProvider: "", visionModel: "" }) };
         const decBody = JSON.parse(opts?.body ?? "{}");
         return { ok: true, json: async () => ({ ok: true, provider: decBody.provider || "stub", model: decBody.model || "stub", removed: decBody.remove === true, input: decBody.remove === true ? undefined : ["text", "image"], restartRequired: true }) };
+      }
+      // 文件上传路由：GET 空列表 / DELETE 成功 / POST 返回 stub 文件。
+      if (typeof url === "string" && url.includes("/api/dsh-rider-upload")) {
+        if (method === "GET") return { ok: true, json: async () => ({ ok: true, files: [] }) };
+        if (method === "DELETE") return { ok: true, json: async () => ({ ok: true, removed: [] }) };
+        return { ok: true, json: async () => ({ ok: true, file: { id: "u1", name: "stub.txt", size: 4, mediaType: "text/plain", path: "C:\\stub\\u1.txt", createdAt: Date.now() } }) };
       }
       // GET：返回当前 resolved/user 快照。
       if (method === "GET") {
@@ -826,7 +994,7 @@ const clientExecuteGate = gate(
     await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel", "composerUploadToggle", "composerUploadHint", "uploadDirLabel", "uploadDirHint", "uploadMaxMBLabel", "uploadMaxMBHint", "uploadTitle", "uploadDescription", "uploadHint", "uploadInsert", "uploadInserted", "uploadCopyPath", "uploadCopied", "uploadDelete", "uploadDeleteFailed", "uploadTooLarge", "uploadFailed", "uploading", "uploadedTitle", "uploadedEmpty", "uploadedRefresh", "uploadedClear", "uploadedClearing", "uploadedListFailed"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
     const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
@@ -983,7 +1151,7 @@ const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1] : null;
 let failed = 0;
 
-for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
+for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, uploadExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
   if (only && g.name !== only) continue;
   const self = await g.selfTest();
   if (self.length > 0) {

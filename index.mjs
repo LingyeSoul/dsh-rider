@@ -36,6 +36,23 @@
  *   - 图片必须经 ctx.attachments.saveImage 入库（adapter 经 readImage 取字节），
  *     校验通过才构造 {type:'image', attachment} 消息块，走 ctx.llm.stream。
  *
+ * 能力四：对话输入框拖拽上传任意文件 —— `/api/dsh-rider-upload`。
+ *   - 背景：DSH 原生 composer 只接受图片附件（png/jpeg/webp/gif，imageLimits
+ *     mediaTypes 硬编码），拖入/粘贴非图片文件 → InputBar `intakeImages` →
+ *     `createDraftImages` 抛 UnsupportedImageMediaTypeError → toast「不支持的文件
+ *     类型」（dsh-client-ui-conversation/lib/client.js:3564/9664）。官方
+ *     dsh-attachment 也明示「第一版仅接受 PNG/JPEG/WebP/GIF；通用文件需要单独的
+ *     生命周期与提供方契约」——框架层无通用附件通道，插件自建是唯一路径。
+ *   - 解法：client half 的 composer dock 在 capture 阶段拦截非图片文件的
+ *     paste/drop（先于 InputBar 的 document bubble listener），经本路由把文件
+ *     二进制上传到本机上传目录（默认 ~/.dsh-rider/uploads，settings uploadDir
+ *     可覆盖），返回**绝对路径**。文件引用以纯文本插入 composer——消息不含附件，
+ *     apiproxy 的图片准入拦截不触发；agent 收到路径后用 fs/pwsh 工具直接读文件
+ *     内容（dsh-fs-local 的 read 对绝对路径无范围限制，不依赖会话 workspace）。
+ *   - 大小上限：settings uploadMaxBytes（MB，数字），默认 50MB；超限 413。
+ *   - 生命周期：每文件一个 `<id>.meta.json`（名称/大小/类型/路径/时间），列表
+ *     扫描目录、删除按 id/清空，零锁零 index 竞争。
+ *
  * 能力三：前置视觉设置页 HTTP 路由 —— `/api/dsh-rider-vision`。
  *   - 背景：dsh「设置→插件→插件配置」的 settings.plugin.item 卡片只在目标
  *     settings namespace 被 apiproxy 显式暴露给 Web client 时渲染
@@ -64,8 +81,10 @@
  */
 
 import { execFile } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
-import { basename, extname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, extname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -239,6 +258,68 @@ const VISION_DEFAULT_PROMPT =
   'Describe this image in detail, including any text, people, objects, layout, and context. 请详细描述这张图片的内容。'
 const VISION_TIMEOUT_MS = 120_000
 
+/* =========================================================================
+ * 能力四：对话输入框拖拽上传任意文件
+ * ========================================================================= */
+
+const DEFAULT_UPLOAD_DIR = join(homedir(), '.dsh-rider', 'uploads')
+const DEFAULT_UPLOAD_MAX_MB = 50
+const UPLOAD_FILE_NAME_MAX = 120
+const UPLOAD_META_SUFFIX = '.meta.json'
+
+/** 文件名清洗：剥路径（basename 同时处理 / 与 \）、去 Windows 非法字符与控制字符、截断。 */
+function sanitizeFileName(name) {
+  const cleaned = basename(String(name ?? ''))
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, UPLOAD_FILE_NAME_MAX)
+  return cleaned === '' || cleaned === '.' || cleaned === '..' ? 'file' : cleaned
+}
+
+/** 上传目录：settings.uploadDir 覆盖默认 ~/.dsh-rider/uploads（绝对化）。 */
+function resolveUploadDir(visionSettings) {
+  const configured = String(visionSettings.get()?.uploadDir ?? '').trim()
+  return configured === '' ? DEFAULT_UPLOAD_DIR : resolve(configured)
+}
+
+/** 上传大小上限：settings.uploadMaxBytes（MB，数字；0/缺省回默认）。 */
+function resolveUploadMaxBytes(visionSettings) {
+  const mb = Number(visionSettings.get()?.uploadMaxBytes)
+  return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : DEFAULT_UPLOAD_MAX_MB * 1024 * 1024
+}
+
+/** 读取请求二进制 body；超过 limit 立即拒绝（RIDER_UPLOAD_TOO_LARGE）并暂停读取。 */
+function readBinaryBody(req, limit) {
+  return new Promise((resolveBody, reject) => {
+    const chunks = []
+    let total = 0
+    let settled = false
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    req?.on?.('data', (chunk) => {
+      if (settled) return
+      const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk))
+      total += size
+      if (total > limit) {
+        req.pause?.()
+        fail(Object.assign(new Error(`文件大小 ${total} 字节超过上限 ${limit} 字节`), { code: 'RIDER_UPLOAD_TOO_LARGE' }))
+        return
+      }
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    })
+    req?.on?.('end', () => {
+      if (settled) return
+      settled = true
+      resolveBody(Buffer.concat(chunks))
+    })
+    req?.on?.('error', (error) => fail(error))
+  })
+}
+
 /** 归一化图片 media type：声明值（可带参数）与扩展名互相兜底，别名收敛到标准名。 */
 function normalizeMediaType(declared, ext) {
   for (const candidate of [declared, IMAGE_EXT_MEDIA_TYPES[ext]]) {
@@ -394,12 +475,14 @@ async function runVisionCall(ctx, { provider, model, image, prompt, signal }) {
   }
 }
 
-/** dsh-rider settings 命名空间：前置视觉理解的默认模型选择（均为可选）。 */
+/** dsh-rider settings 命名空间：前置视觉理解的默认模型选择 + 文件上传配置（均为可选）。 */
 const VISION_SETTINGS_NS = settingsNamespace('dsh-rider')
 const VISION_SETTINGS_SCHEMA = z.object({
   visionProvider: z.string(),
   visionModel: z.string(),
   visionPrompt: z.string(),
+  uploadDir: z.string(),
+  uploadMaxBytes: z.number(),
 })
 
 export function apply(ctx) {
@@ -577,18 +660,20 @@ export function apply(ctx) {
           }
           const method = req?.method
           try {
-            if (method === 'GET') {
+            /** resolved 快照：三个视觉字段 + 两个上传配置（uploadMaxBytes 0 = 默认）。 */
+            const snapshot = () => {
               const stored = visionSettings.get() ?? {}
+              return {
+                visionProvider: typeof stored.visionProvider === 'string' ? stored.visionProvider : '',
+                visionModel: typeof stored.visionModel === 'string' ? stored.visionModel : '',
+                visionPrompt: typeof stored.visionPrompt === 'string' ? stored.visionPrompt : '',
+                uploadDir: typeof stored.uploadDir === 'string' ? stored.uploadDir : '',
+                uploadMaxBytes: Number(stored.uploadMaxBytes) > 0 ? Number(stored.uploadMaxBytes) : 0,
+              }
+            }
+            if (method === 'GET') {
               const user = readUserLayer()
-              send(200, {
-                ok: true,
-                resolved: {
-                  visionProvider: stored.visionProvider ?? '',
-                  visionModel: stored.visionModel ?? '',
-                  visionPrompt: stored.visionPrompt ?? '',
-                },
-                user,
-              })
+              send(200, { ok: true, resolved: snapshot(), user })
               return
             }
             if (method !== 'POST') {
@@ -600,25 +685,21 @@ export function apply(ctx) {
               await visionSettings.replace({})
             } else {
               const patch = {}
-              for (const field of ['visionProvider', 'visionModel', 'visionPrompt']) {
+              for (const field of ['visionProvider', 'visionModel', 'visionPrompt', 'uploadDir', 'uploadMaxBytes']) {
                 if (Object.prototype.hasOwnProperty.call(body.update ?? {}, field)) {
                   const value = body.update[field]
-                  patch[field] = typeof value === 'string' ? value.trim() : ''
+                  if (field === 'uploadMaxBytes') {
+                    const n = Number(value)
+                    patch[field] = Number.isFinite(n) && n >= 0 ? n : 0
+                  } else {
+                    patch[field] = typeof value === 'string' ? value.trim() : ''
+                  }
                 }
               }
               await visionSettings.update(patch)
             }
-            const stored = visionSettings.get() ?? {}
             const user = readUserLayer()
-            send(200, {
-              ok: true,
-              resolved: {
-                visionProvider: stored.visionProvider ?? '',
-                visionModel: stored.visionModel ?? '',
-                visionPrompt: stored.visionPrompt ?? '',
-              },
-              user,
-            })
+            send(200, { ok: true, resolved: snapshot(), user })
           } catch (error) {
             send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
           }
@@ -790,7 +871,114 @@ export function apply(ctx) {
           }
         },
       })
-      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.() }
+      /* 文件上传路由：'/api/dsh-rider-upload'。
+       * client half 的 composer dock 把非图片文件（拖拽/粘贴）二进制 POST 到这里，
+       * handler 写入上传目录（默认 ~/.dsh-rider/uploads，settings uploadDir 覆盖）并
+       * 返回绝对路径——agent 收到路径后用 fs/pwsh 工具直接读文件内容，消息本身是
+       * 纯文本，绕开 DSH 对话流的图片准入拦截。GET 列表 / DELETE 单删或清空
+       * （每文件一个 <id>.meta.json，扫描目录零锁）。大小上限
+       * settings uploadMaxBytes（MB），超限 413。 */
+      const stopUpload = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-upload',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          try {
+            const dir = resolveUploadDir(visionSettings)
+            const maxBytes = resolveUploadMaxBytes(visionSettings)
+            const method = req?.method
+            if (method === 'GET') {
+              await mkdir(dir, { recursive: true })
+              const files = []
+              for (const name of await readdir(dir)) {
+                if (!name.endsWith(UPLOAD_META_SUFFIX)) continue
+                try {
+                  const meta = JSON.parse(await readFile(join(dir, name), 'utf8'))
+                  if (meta && typeof meta.id === 'string' && typeof meta.path === 'string') files.push(meta)
+                } catch {
+                  // 损坏的 meta 跳过（不阻断列表）
+                }
+              }
+              files.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
+              send(200, { ok: true, files })
+              return
+            }
+            if (method === 'DELETE') {
+              await mkdir(dir, { recursive: true })
+              const body = await readJsonBody(req)
+              if (body.clear === true) {
+                for (const name of await readdir(dir)) {
+                  await rm(join(dir, name), { force: true })
+                }
+                send(200, { ok: true, cleared: true, removed: [] })
+                return
+              }
+              const ids = Array.isArray(body.ids)
+                ? body.ids.map(String)
+                : (typeof body.id === 'string' ? [body.id] : [])
+              const removed = []
+              for (const id of ids) {
+                const metaPath = join(dir, `${id}${UPLOAD_META_SUFFIX}`)
+                try {
+                  const meta = JSON.parse(await readFile(metaPath, 'utf8'))
+                  await rm(join(dir, String(meta.storageName ?? id)), { force: true })
+                  await rm(metaPath, { force: true })
+                  removed.push(id)
+                } catch {
+                  // 不存在/已删：跳过
+                }
+              }
+              send(200, { ok: true, removed })
+              return
+            }
+            if (method !== 'POST') {
+              send(405, { ok: false, message: 'method not allowed' })
+              return
+            }
+            const data = await readBinaryBody(req, maxBytes)
+            if (data.length === 0) {
+              send(400, { ok: false, message: '请求体为空（未收到文件数据）' })
+              return
+            }
+            let rawName = ''
+            try {
+              rawName = decodeURIComponent(String(req.headers?.['x-file-name'] ?? ''))
+            } catch {
+              rawName = ''
+            }
+            const name = sanitizeFileName(rawName)
+            const mediaType = String(req.headers?.['x-file-type'] ?? 'application/octet-stream')
+              .split(';')[0].trim() || 'application/octet-stream'
+            const id = randomUUID()
+            const storageName = `${id}${extname(name)}`
+            await mkdir(dir, { recursive: true })
+            await writeFile(join(dir, storageName), data)
+            const file = {
+              id,
+              name,
+              size: data.length,
+              mediaType,
+              path: join(dir, storageName),
+              createdAt: Date.now(),
+              storageName,
+            }
+            await writeFile(join(dir, `${id}${UPLOAD_META_SUFFIX}`), JSON.stringify(file))
+            const { storageName: _internal, ...publicFile } = file
+            send(200, { ok: true, file: publicFile })
+          } catch (error) {
+            if (error?.code === 'RIDER_UPLOAD_TOO_LARGE') {
+              send(413, { ok: false, message: error.message })
+              return
+            }
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
+      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.(); stopUpload?.() }
     }, 'dsh-rider: vision settings + understand + declare routes')
   }
 }

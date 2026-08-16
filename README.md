@@ -3,8 +3,10 @@
 <p align="center">
   DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）
   + 前置视觉理解工具 <code>vision_understand</code>（会话模型不支持图片时，用 dsh 配置的
-  支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 视觉模型图片模态声明（pi-ai 手写
-  provider 的 <code>input:[text,image]</code> 补丁，dsh 面板不暴露该字段）。
+  支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 对话输入框拖拽上传任意文件
+  （非图片文件上传到本机，绝对路径插入消息，agent 用 fs/pwsh 工具读取）
+  + 视觉模型图片模态声明（pi-ai 手写 provider 的 <code>input:[text,image]</code> 补丁，
+  dsh 面板不暴露该字段）。
   DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
   自动回退 Bing。并注入系统提示指引让 agent 优先使用它（内置 deepseek 网页搜索仅作最终后备）。
 </p>
@@ -123,6 +125,26 @@ DSH 对纯文本会话模型的图片准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAG
 
 > 技术细节见决策记录 `decisions/implemented/2026-08-15-composer-paste-vision-dock.md`。
 
+# 对话输入框拖拽上传文件（任意类型）
+
+DSH 原生 composer 只接受图片附件——拖入/粘贴非图片文件会被原生 InputBar 拒绝并提示
+「不支持的文件类型」（官方 `dsh-client-ui-attachment` 也明示「仅支持图片」）。dsh-rider
+在对话输入框补上**任意文件上传**：
+
+- 在 composer 里**拖入**（或从资源管理器**复制后 Ctrl+V 粘贴**）任意非图片文件 →
+  dsh-rider 把文件上传到本机上传目录（默认 `~/.dsh-rider/uploads`，设置页可改）→
+  输入框上方浮层显示文件卡片（名称/大小/状态）。
+- 点「**插入路径**」把文件的**绝对路径**写进消息（或「复制路径」自行粘贴）→ 发送 →
+  agent 用自己的 fs/pwsh 工具读取文件内容。消息本身是纯文本，不触发 DSH 对话流的
+  附件准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAGES` 只拦图片块）——纯文本会话模型同样适用。
+- 多文件拖入逐个上传；可单删/全部清除（设置页「已上传文件」卡片也有列表管理）。
+- 图片不受影响：仍走「对话粘贴捕获」（视觉理解）或原生图片附件路径。
+- 大小上限默认 50MB/文件（设置页 `uploadMaxBytes` 可调）；文件名自动清洗（剥路径、
+  去 Windows 保留字符），存储名随机化，防路径穿越。
+- 默认开；可在 **设置 → dsh-rider** 页关闭「在对话输入框捕获拖拽/粘贴的文件并上传」。
+
+> 技术细节见决策记录 `decisions/implemented/2026-08-16-composer-file-upload.md`。
+
 ## 为视觉模型补图片模态声明（pi-ai 手写 provider）
 
 dsh 的 pi-ai provider 在 `ctx.llm.stream` 内部强制校验模型的 `input` 模态——
@@ -145,9 +167,10 @@ dsh web 生效**（pi-ai 路由是注册级事实）。
 
 ## 设置界面配置（推荐）
 
-装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：三个字段（视觉提供商 /
-视觉模型 / 默认指令，保存即写入 `dsh-rider` settings 命名空间，live 生效无需重启）
-+ 三张卡片（「为视觉模型补图片模态声明」「对话粘贴捕获开关」「图片理解」）。等效于
+装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：五个字段（视觉提供商 /
+视觉模型 / 默认指令 / 上传目录 / 单文件大小上限（MB），保存即写入 `dsh-rider`
+settings 命名空间，live 生效无需重启） + 五张卡片（「为视觉模型补图片模态声明」
+「对话粘贴捕获开关」「对话文件上传开关」「已上传文件」「图片理解」）。等效于
 手改 `settings.yaml`：
 
 ```yaml
@@ -155,6 +178,8 @@ dsh-rider:
   visionProvider: siliconflow
   visionModel: zai-org/GLM-5.2
   visionPrompt: 请详细描述这张图片的内容
+  uploadDir: ~/.dsh-rider/uploads   # 上传目录（留空用默认）
+  uploadMaxBytes: 50                # 单文件上限（MB，0 = 默认 50）
 ```
 
 > **为什么是独立设置页而非「设置→插件→插件配置」卡片**：dsh rc.6 的「插件
@@ -259,10 +284,11 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间 + 三条自建 HTTP 路由：`/api/dsh-rider-vision` 配置读写、
+  settings 命名空间 + 四条自建 HTTP 路由：`/api/dsh-rider-vision` 配置读写、
   `/api/dsh-rider-vision/understand` 图片理解、`/api/dsh-rider-vision/declare`
-  图片模态声明）；`client/index.js` = client half（`settings.section` 独立设置页
-  含三张卡片 + `conversation.input.dock` 对话粘贴图片捕获，CJS 源码即产物，零构建链）；
+  图片模态声明、`/api/dsh-rider-upload` 文件上传/列表/删除）；`client/index.js` =
+  client half（`settings.section` 独立设置页含五张卡片 + `conversation.input.dock`
+  对话粘贴图片捕获与文件上传，CJS 源码即产物，零构建链）；
   搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闘包）；
   视觉能力全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
   `ctx.agentDefaultModel` / `ctx.webServer`，零新增依赖）。
