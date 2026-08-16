@@ -599,6 +599,41 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 附件栏在 composer 卡片内部的安置点（自研，思路对齐社区插件的「工具行地标」）：
+     * 从 textarea 上溯，找第一个「同一祖先内既有 textarea 又有按钮」的列容器
+     * （工具按钮行所在的内容列），把附件栏插在该列内、输入块（textarea 所在行容器）
+     * 之前——composer 卡片自然拉高，不遮挡任何外部选项/按钮。退化：找不到时插到
+     * textarea 父层（仍在卡片内）。
+     * @returns {host, insertBefore} 或 null（无 composer）。
+     */
+    function findAttachmentHost(composerEl) {
+      if (!composerEl) return null
+      let anchor = composerEl
+      let column = composerEl.parentElement
+      while (column && column !== document.body && !column.querySelector('button')) {
+        anchor = column
+        column = column.parentElement
+      }
+      if (!column || column === document.body) {
+        return { host: composerEl.parentElement || document.body, insertBefore: composerEl }
+      }
+      return { host: column, insertBefore: anchor }
+    }
+
+    /** 附件区内嵌样式：随 composer 卡片流布局，不遮挡外部元素。 */
+    const attachSectionStyle = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      padding: '4px 14px 0',
+      boxSizing: 'border-box',
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+    }
+    const attachHeadStyle = { display: 'flex', alignItems: 'center', gap: 8 }
+    const attachTitleInnerStyle = { margin: 0, fontSize: 12, fontWeight: 600, flex: 1 }
+
     /** dock 结果卡样式：position: fixed，锚在 composer 上方（fallback 右下角）。 */
     const dockCardStyle = {
       position: 'fixed',
@@ -660,6 +695,7 @@ window.__ModuleLoader__.load({
       const [copiedKey, setCopiedKey] = useState(null)
       const [notice, setNotice] = useState(null) // {kind:'error'|'info', text}
       const reqId = useRef(0)
+      const attachAnchorRef = useRef(null) // 附件栏在 composer 内部的占位节点
       const key = typeof sessionId === 'string' ? sessionId : undefined
 
       /** 回写「当前可见 composer」的会话上下文（全窗入口路由用）。 */
@@ -764,12 +800,16 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [composerEl, sessionId])
 
-      /** 切换 session：作废进行中的视觉任务并清空浮层状态。 */
+      /** 切换 session：作废进行中的视觉任务并清空浮层状态、移除附件占位。 */
       useEffect(() => {
         reqId.current += 1
         setTask(null)
         setNotice(null)
         setCopiedKey(null)
+        if (attachAnchorRef.current) {
+          attachAnchorRef.current.remove()
+          attachAnchorRef.current = null
+        }
       }, [sessionId])
 
       /** 把图片走 dsh-rider 自建 /understand 路由；reqId 防陈旧结果覆盖。 */
@@ -855,17 +895,13 @@ window.__ModuleLoader__.load({
       }, [task])
 
       const cardCount = stashed.length + staging.length
-      if (!task && cardCount === 0 && !notice) return null
-
-      const cardStyle = Object.assign({}, dockCardStyle)
-      if (anchor) {
-        cardStyle.left = Math.max(8, anchor.left)
-        cardStyle.width = Math.min(Math.max(280, anchor.width), 460)
-        cardStyle.bottom = Math.max(8, anchor.bottomGap + 12)
-      } else {
-        cardStyle.right = 16
-        cardStyle.bottom = 16
-        cardStyle.width = 360
+      if (!task && cardCount === 0 && !notice) {
+        // 无内容时清理可能残留的占位节点（display:contents，无视觉但保持 DOM 干净）
+        if (attachAnchorRef.current) {
+          attachAnchorRef.current.remove()
+          attachAnchorRef.current = null
+        }
+        return null
       }
 
       const fileRowStyle = {
@@ -873,8 +909,7 @@ window.__ModuleLoader__.load({
         alignItems: 'center',
         gap: 8,
         minWidth: 0,
-        padding: '6px 0',
-        borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+        padding: '4px 0',
       }
       const fileMainStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }
       const fileNameStyle = { margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
@@ -936,47 +971,85 @@ window.__ModuleLoader__.load({
         ),
       ))
 
-      return createPortal(
-        h('div', { style: cardStyle, 'data-dsh-rider-vision-overlay': 'true' },
-          h('div', { style: dockHeadStyle },
-            h('span', { style: dockTitleStyle }, task ? t('composerTitle') : t('attachTitle')),
-            h('button', { type: 'button', onClick: () => { reqId.current += 1; setTask(null); setNotice(null) }, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
+      // —— 附件区：portal 进 composer 卡片内部（输入块上方，随卡片流布局，不遮挡） ——
+      const attachHost = composerEl ? findAttachmentHost(composerEl) : null
+      let attachmentNode = null
+      if (attachHost && (cardCount > 0 || notice)) {
+        const anchor = attachAnchorRef.current
+        if (!anchor || anchor.parentElement !== attachHost.host || anchor.nextSibling !== attachHost.insertBefore) {
+          const placeholder = document.createElement('div')
+          placeholder.style.display = 'contents'
+          attachHost.host.insertBefore(placeholder, attachHost.insertBefore)
+          if (anchor) anchor.remove()
+          attachAnchorRef.current = placeholder
+        }
+        attachmentNode = createPortal(
+          h('div', { style: attachSectionStyle, 'data-dsh-rider-attach-bar': 'true' },
+            notice
+              ? h('p', { style: Object.assign({}, notice.kind === 'error' ? errorStyle : mutedStyle, { margin: '0 0 4px' }) }, notice.text)
+              : null,
+            cardCount > 0
+              ? h('div', { style: attachHeadStyle },
+                  h('span', { style: attachTitleInnerStyle }, t('attachTitle') + `\uff08${stashed.length}\uff09`),
+                  stashed.length > 0
+                    ? h(Button, { variant: 'ghost', size: 'sm', onClick: clearStash }, t('attachClear'))
+                    : null,
+                )
+              : null,
+            stagingRows,
+            stashedRows,
           ),
-          task && task.preview
-            ? h('img', { src: task.preview, alt: task.name || '', style: dockThumbStyle })
-            : null,
-          task && task.status === 'busy'
-            ? h('p', { style: mutedStyle }, t('imageUnderstanding'))
-            : null,
-          task && task.status === 'error'
-            ? h('p', { style: errorStyle }, t('composerFailed') + (task.error ? '\uff1a' + task.error : ''))
-            : null,
-          task && task.status === 'done'
-            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
-                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-                  h('span', { style: metaStyle }, task.provider + '/' + task.model),
-                  h(Button, { variant: 'ghost', size: 'sm', onClick: onCopy }, t('imageCopy')),
-                ),
-                h('pre', { style: resultBoxStyle }, task.text),
-                task.note ? h('p', { style: mutedStyle }, task.note) : null,
-              )
-            : null,
-          notice
-            ? h('p', { style: notice.kind === 'error' ? errorStyle : mutedStyle }, notice.text)
-            : null,
-          cardCount > 0
-            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
-                h('span', { style: Object.assign({}, dockTitleStyle, { margin: 0 }) }, t('attachTitle') + `\uff08${stashed.length}\uff09`),
-                stashed.length > 0
-                  ? h(Button, { variant: 'ghost', size: 'sm', onClick: clearStash }, t('attachClear'))
-                  : null,
-              )
-            : null,
-          stagingRows,
-          stashedRows,
-        ),
-        document.body,
-      )
+          attachAnchorRef.current,
+        )
+      } else if (attachAnchorRef.current) {
+        attachAnchorRef.current.remove()
+        attachAnchorRef.current = null
+      }
+
+      // —— 视觉任务浮层：fixed 锚在 composer 上方（可关闭的临时 overlay） ——
+      let visionNode = null
+      if (task) {
+        const visionStyle = Object.assign({}, dockCardStyle)
+        if (anchor) {
+          visionStyle.left = Math.max(8, anchor.left)
+          visionStyle.width = Math.min(Math.max(280, anchor.width), 460)
+          visionStyle.bottom = Math.max(8, anchor.bottomGap + 12)
+        } else {
+          visionStyle.right = 16
+          visionStyle.bottom = 16
+          visionStyle.width = 360
+        }
+        visionNode = createPortal(
+          h('div', { style: visionStyle, 'data-dsh-rider-vision-overlay': 'true' },
+            h('div', { style: dockHeadStyle },
+              h('span', { style: dockTitleStyle }, t('composerTitle')),
+              h('button', { type: 'button', onClick: () => { reqId.current += 1; setTask(null) }, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
+            ),
+            task.preview
+              ? h('img', { src: task.preview, alt: task.name || '', style: dockThumbStyle })
+              : null,
+            task.status === 'busy'
+              ? h('p', { style: mutedStyle }, t('imageUnderstanding'))
+              : null,
+            task.status === 'error'
+              ? h('p', { style: errorStyle }, t('composerFailed') + (task.error ? '\uff1a' + task.error : ''))
+              : null,
+            task.status === 'done'
+              ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } },
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                    h('span', { style: metaStyle }, task.provider + '/' + task.model),
+                    h(Button, { variant: 'ghost', size: 'sm', onClick: onCopy }, t('imageCopy')),
+                  ),
+                  h('pre', { style: resultBoxStyle }, task.text),
+                  task.note ? h('p', { style: mutedStyle }, task.note) : null,
+                )
+              : null,
+          ),
+          document.body,
+        )
+      }
+
+      return h(React.Fragment, null, visionNode, attachmentNode)
     }
 
     /**

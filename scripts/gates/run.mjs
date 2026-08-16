@@ -979,6 +979,12 @@ function makeDocumentStub() {
       children: [],
       append(...kids) { for (const kid of kids) this.children.push(kid); },
       appendChild(child) { this.children.push(child); return child; },
+      insertBefore(child, ref) {
+        const at = ref === null ? this.children.length : this.children.indexOf(ref);
+        if (at < 0) this.children.push(child);
+        else this.children.splice(at, 0, child);
+        return child;
+      },
       addEventListener() {},
       removeEventListener() {},
       remove() {},
