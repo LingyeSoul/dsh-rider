@@ -310,6 +310,7 @@ function checkApply(mod) {
   const tools = [];
   const sections = [];
   const fakeCtx = {
+    on: () => {},
     tools: { register: (tool) => { tools.push(tool); } },
     systemPrompt: { section: (section) => { sections.push(section); } },
     settings: { register: () => ({ get: () => ({}) }) },
@@ -512,6 +513,7 @@ function makeVisionHarness(overrides) {
   const registeredTools = [];
   const sections = [];
   const ctx = {
+    on: () => {},
     tools: { register: (tool) => { registeredTools.push(tool); } },
     systemPrompt: { section: (section) => { sections.push(section); } },
     settings: { register: () => ({ get: () => overrides.settingsValue ?? {} }) },
@@ -648,11 +650,12 @@ const visionExecuteGate = gate(
 
 /** 构造 fake IncomingMessage：真实 Readable（缓冲语义，晚注册监听也能收到 body，
  *  对齐 Node http 请求流的背压行为——不会因 handler 先 await 其他操作而丢 data/end）。 */
-function makeFakeReq(body, method, headers) {
+function makeFakeReq(body, method, headers, url) {
   const chunk = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ""));
   const req = Readable.from(chunk);
   req.method = method;
   req.headers = headers ?? {};
+  if (url !== undefined) req.url = url;
   return req;
 }
 
@@ -664,11 +667,12 @@ function makeFakeRes() {
   return res;
 }
 
-/** apply 后捕获 webServer 注册的路由；settings.get 返回给定值（uploadDir 必须显式给临时目录）。 */
+/** apply 后捕获 webServer 注册的路由；settings.get 返回给定值。 */
 function makeUploadHarness(settingsValue) {
   const registered = [];
   const ctx = {
     effect: (fn) => { fn(); },
+    on: () => {},
     tools: { register: () => {} },
     systemPrompt: { section: () => {} },
     settings: { register: () => ({ get: () => settingsValue ?? {} }) },
@@ -680,114 +684,162 @@ function makeUploadHarness(settingsValue) {
   return { ctx, registered };
 }
 
-/** 取出上传路由 handler；未注册直接抛错。 */
-function uploadHandler(registered) {
-  const route = registered.find((r) => r.path === "/api/dsh-rider-upload");
-  if (!route || typeof route.handler !== "function") throw new Error("upload-execute: 未注册 /api/dsh-rider-upload 路由");
+/** 取出指定路径的 handler；未注册直接抛错。 */
+function routeHandler(registered, path, label) {
+  const route = registered.find((r) => r.path === path);
+  if (!route || typeof route.handler !== "function") throw new Error(`${label}: 未注册 ${path} 路由`);
   return route.handler;
 }
 
-/** 一次调用：返回 {status, body}。 */
-async function callUpload(handler, { method = "POST", body, headers } = {}) {
+/** 一次调用：返回 {status, body}。url 可选（GET query 用）。 */
+async function callUpload(handler, { method = "POST", body, headers, url } = {}) {
   const res = makeFakeRes();
-  await handler(makeFakeReq(body, method, headers), res);
+  await handler(makeFakeReq(body, method, headers, url), res);
   let parsed = null;
   try { parsed = JSON.parse(res.body); } catch {}
   return { status: res.statusCode, body: parsed, raw: res.body };
 }
 
-const uploadExecuteGate = gate(
-  "upload-execute",
+const stashExecuteGate = gate(
+  "stash-execute",
   async () => {
     const created = ensureEntryStubs();
-    const tmp = mkdtempSync(join(tmpdir(), "dsh-rider-upload-gate-"));
+    const tmp = mkdtempSync(join(tmpdir(), "dsh-rider-stash-gate-"));
+    // 隔离全局索引：DSH_HOME 指向临时目录（防污染真实 ~/.dsh/attachments-index.json）
+    const savedDshHome = process.env.DSH_HOME;
+    process.env.DSH_HOME = tmp;
+    const workspace = join(tmp, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const sid = "sess-1";
     try {
       const mod = await import(pathToFileURL(join(ROOT, "index.mjs")).href);
       const problems = [];
-      const settingsValue = { uploadDir: tmp, uploadMaxBytes: 0 };
-      const { ctx, registered } = makeUploadHarness(settingsValue);
+      const { ctx, registered } = makeUploadHarness({ uploadMaxBytes: 0 });
       mod.apply(ctx);
-      const handler = uploadHandler(registered);
-      const enc = encodeURIComponent;
-
-      // 成功路径：中文文件名 + text/plain 内容落盘
-      const hello = Buffer.from("hello from dsh-rider upload gate", "utf8");
-      const up = await callUpload(handler, {
-        method: "POST",
-        body: hello,
-        headers: { "x-file-name": enc("报告.txt"), "x-file-type": "text/plain; charset=utf-8" },
+      const stash = routeHandler(registered, "/api/dsh-rider-stash", "stash-execute");
+      const restage = routeHandler(registered, "/api/dsh-rider-stash/restage", "stash-execute");
+      const read = routeHandler(registered, "/api/dsh-rider-stash/read", "stash-execute");
+      const uploadsDir = join(workspace, ".dsh", "uploads");
+      const post = (payload) => callUpload(stash, { method: "POST", body: JSON.stringify(payload), headers: { "content-type": "application/json" } });
+      const del = (payload) => callUpload(stash, { method: "DELETE", body: JSON.stringify(payload), headers: { "content-type": "application/json" } });
+      const listStash = () => callUpload(stash, { method: "GET", url: `/api/dsh-rider-stash?sessionId=${sid}` });
+      const readStash = (relPath) => callUpload(read, {
+        method: "GET",
+        url: `/api/dsh-rider-stash/read?cwd=${encodeURIComponent(workspace)}&relPath=${encodeURIComponent(relPath)}`,
       });
+
+      // 成功路径：中文文件名 + 内容落盘到 workspace/.dsh/uploads + pending
+      const hello = "hello from stash gate";
+      const up = await post({ cwd: workspace, sessionId: sid, name: "报告.txt", dataBase64: Buffer.from(hello, "utf8").toString("base64") });
       if (up.status !== 200 || up.body?.ok !== true) {
-        problems.push(`上传成功路径失败：HTTP ${up.status} ${up.raw}`);
+        problems.push(`stash 成功路径失败：HTTP ${up.status} ${up.raw}`);
       } else {
         const file = up.body.file;
-        if (file.name !== "报告.txt") problems.push(`上传文件名清洗错误：${file.name}`);
-        if (file.mediaType !== "text/plain") problems.push(`上传 mediaType 错误：${file.mediaType}`);
-        if (file.size !== hello.length) problems.push(`上传 size 错误：${file.size}`);
-        if (!file.path || !file.path.startsWith(tmp)) problems.push(`上传 path 不在 uploadDir：${file.path}`);
-        const stored = readFileSync(file.path);
-        if (!stored.equals(hello)) problems.push("上传落盘内容不一致");
-        if (!existsSync(join(tmp, `${file.id}.meta.json`))) problems.push("上传未写 meta 文件");
-        // 列表
-        const list = await callUpload(handler, { method: "GET" });
-        if (list.status !== 200 || !Array.isArray(list.body?.files) || list.body.files.length !== 1) {
+        if (!file.relPath.startsWith(".dsh/uploads/")) problems.push(`relPath 不在 uploads 下：${file.relPath}`);
+        if (file.name !== "报告.txt") problems.push(`文件名清洗错误：${file.name}`);
+        if (file.size !== Buffer.byteLength(hello)) problems.push(`size 错误：${file.size}`);
+        const stored = readFileSync(join(workspace, file.relPath));
+        if (stored.toString("utf8") !== hello) problems.push("落盘内容不一致");
+        // 列表（pending 真相源）
+        const list = await listStash();
+        if (list.status !== 200 || !Array.isArray(list.body?.files) || list.body.files.length !== 1 || list.body.files[0].relPath !== file.relPath) {
           problems.push(`列表路径失败：HTTP ${list.status} ${list.raw}`);
         }
+        // 读回（预览）
+        const readBack = await readStash(file.relPath);
+        if (readBack.status !== 200 || Buffer.from(readBack.body?.dataBase64 ?? "", "base64").toString("utf8") !== hello) {
+          problems.push(`read 路径失败：HTTP ${readBack.status} ${readBack.raw}`);
+        }
         // 单删
-        const del = await callUpload(handler, { method: "DELETE", body: JSON.stringify({ id: file.id }), headers: { "content-type": "application/json" } });
-        if (del.status !== 200 || !Array.isArray(del.body?.removed) || del.body.removed[0] !== file.id) {
-          problems.push(`单删路径失败：HTTP ${del.status} ${del.raw}`);
-        }
-        if (existsSync(file.path) || existsSync(join(tmp, `${file.id}.meta.json`))) problems.push("单删未清除磁盘文件");
+        const del1 = await del({ cwd: workspace, sessionId: sid, relPath: file.relPath });
+        if (del1.status !== 200 || del1.body?.removed !== true) problems.push(`单删路径失败：HTTP ${del1.status} ${del1.raw}`);
+        if (existsSync(join(workspace, file.relPath))) problems.push("单删未清除磁盘文件");
         // 清空
-        for (let i = 0; i < 2; i++) {
-          await callUpload(handler, { method: "POST", body: Buffer.from(`file-${i}`), headers: { "x-file-name": enc(`f${i}.txt`) } });
-        }
-        const clear = await callUpload(handler, { method: "DELETE", body: JSON.stringify({ clear: true }), headers: { "content-type": "application/json" } });
+        await post({ cwd: workspace, sessionId: sid, name: "a.txt", dataBase64: Buffer.from("a").toString("base64") });
+        await post({ cwd: workspace, sessionId: sid, name: "b.txt", dataBase64: Buffer.from("b").toString("base64") });
+        const clear = await del({ cwd: workspace, sessionId: sid, clear: true });
         if (clear.status !== 200 || clear.body?.cleared !== true) problems.push(`清空路径失败：HTTP ${clear.status} ${clear.raw}`);
-        const after = await callUpload(handler, { method: "GET" });
+        const after = await listStash();
         if (after.body?.files?.length !== 0) problems.push(`清空后列表非空：${after.raw}`);
       }
 
+      // 失败路径：相对 cwd / 不存在的目录
+      const badCwd = await post({ cwd: "relative/path", sessionId: sid, name: "x.txt", dataBase64: Buffer.from("x").toString("base64") });
+      if (badCwd.status !== 500) problems.push(`相对 cwd 未被拒绝：HTTP ${badCwd.status} ${badCwd.raw}`);
+      const noDir = await post({ cwd: join(tmp, "nope"), sessionId: sid, name: "x.txt", dataBase64: Buffer.from("x").toString("base64") });
+      if (noDir.status !== 400) problems.push(`不存在目录未被 400 拒绝：HTTP ${noDir.status} ${noDir.raw}`);
+      // 空内容
+      const empty = await post({ cwd: workspace, sessionId: sid, name: "e.txt", dataBase64: "" });
+      if (empty.status !== 400) problems.push(`空内容未被 400 拒绝：HTTP ${empty.status} ${empty.raw}`);
       // 大小上限：1MB 上限拒 2MB
-      const small = makeUploadHarness({ uploadDir: tmp, uploadMaxBytes: 1 });
+      const small = makeUploadHarness({ uploadMaxBytes: 1 });
       mod.apply(small.ctx);
-      const smallHandler = uploadHandler(small.registered);
-      const tooLarge = await callUpload(smallHandler, {
+      const smallStash = routeHandler(small.registered, "/api/dsh-rider-stash", "stash-execute");
+      const tooLarge = await callUpload(smallStash, {
         method: "POST",
-        body: Buffer.alloc(2 * 1024 * 1024, 7),
-        headers: { "x-file-name": enc("big.bin") },
+        body: JSON.stringify({ cwd: workspace, sessionId: sid, name: "big.bin", dataBase64: Buffer.alloc(2 * 1024 * 1024, 7).toString("base64") }),
+        headers: { "content-type": "application/json" },
       });
       if (tooLarge.status !== 413) problems.push(`超限未被 413 拒绝：HTTP ${tooLarge.status} ${tooLarge.raw}`);
-
-      // 非法文件名清洗：路径穿越与 Windows 保留字符
-      const evil = await callUpload(handler, {
+      // 路径穿越：relPath 含 ..
+      const evilDel = await del({ cwd: workspace, sessionId: sid, relPath: ".dsh/uploads/../escape.txt" });
+      if (evilDel.status !== 500) problems.push(`穿越 relPath 未被拒绝：HTTP ${evilDel.status} ${evilDel.raw}`);
+      const evilRestage = await callUpload(restage, {
         method: "POST",
-        body: Buffer.from("x"),
-        headers: { "x-file-name": enc("..\\..\\evil:name?.txt") },
+        body: JSON.stringify({ cwd: workspace, sessionId: sid, relPath: ".dsh/uploads/..\\x" }),
+        headers: { "content-type": "application/json" },
       });
-      if (evil.status !== 200 || evil.body?.file?.name.includes("..") || evil.body?.file?.name.includes(":")) {
-        problems.push(`非法文件名未被清洗：${evil.raw}`);
+      if (evilRestage.status !== 500) problems.push(`restage 穿越未被拒绝：HTTP ${evilRestage.status} ${evilRestage.raw}`);
+      // 文件名清洗：路径分隔 + 保留字符 → 白名单替换
+      const evilName = await post({ cwd: workspace, sessionId: sid, name: "..\\..\\evil:name?.txt", dataBase64: Buffer.from("x").toString("base64") });
+      if (evilName.status !== 200 || evilName.body?.file?.name.includes("..") || evilName.body?.file?.name.includes(":")) {
+        problems.push(`非法文件名未被清洗：${evilName.raw}`);
       }
-      if (evil.status === 200) {
-        // Windows 盘符路径本身含 ':'，只检查存储名段（目录前缀来自 uploadDir，允许盘符）
-        const storageBase = String(evil.body.file.path).split(/[\\/]/).pop() ?? "";
-        if (storageBase.includes("..") || storageBase.includes(":")) {
-          problems.push(`存储名含分隔符/穿越：${evil.body.file.path}`);
-        }
-      }
+      // restage：本地已存在 → 重新挂载
+      const restageRes = await callUpload(restage, {
+        method: "POST",
+        body: JSON.stringify({ cwd: workspace, sessionId: sid, relPath: evilName.body.file.relPath }),
+        headers: { "content-type": "application/json" },
+      });
+      if (restageRes.status !== 200 || restageRes.body?.ok !== true) problems.push(`restage 本地路径失败：${restageRes.raw}`);
+      // restage：本地缺失 + 索引命中 → 跨项目迁移
+      const otherWorkspace = join(tmp, "other-ws");
+      mkdirSync(otherWorkspace, { recursive: true });
+      const otherUp = await post({ cwd: otherWorkspace, sessionId: "sess-2", name: "migrate.txt", dataBase64: Buffer.from("migrate me", "utf8").toString("base64") });
+      const migrated = await callUpload(restage, {
+        method: "POST",
+        body: JSON.stringify({ cwd: workspace, sessionId: sid, relPath: otherUp.body.file.relPath }),
+        headers: { "content-type": "application/json" },
+      });
+      if (migrated.status !== 200 || migrated.body?.ok !== true) problems.push(`restage 跨项目迁移失败：${migrated.raw}`);
+      if (!existsSync(join(workspace, otherUp.body.file.relPath))) problems.push("跨项目迁移未复制文件到当前工作区");
 
-      // 空 body 拒绝
-      const empty = await callUpload(handler, { method: "POST", body: Buffer.alloc(0), headers: { "x-file-name": enc("e.txt") } });
-      if (empty.status !== 400) problems.push(`空 body 未被 400 拒绝：HTTP ${empty.status} ${empty.raw}`);
+      // pre-step 注入纯函数：enter+已认领 → 注入 + 消费
+      const claimed = [{ id: "u1" }];
+      const decision = { kind: "enter", messages: [{ id: "u1" }, { id: "a1" }] };
+      const folded = mod.foldPendingAttachments(decision, { messages: claimed }, [{ relPath: ".dsh/uploads/x.txt", name: "x.txt", size: 3 }]);
+      if (!folded.consumed) problems.push("pre-step 注入未被消费");
+      if (folded.decision.messages.length !== 3) problems.push(`pre-step 注入消息数错误：${folded.decision.messages.length}`);
+      const noteText = folded.decision.messages[0]?.content?.[0]?.text ?? "";
+      if (!noteText.includes(".dsh/uploads/x.txt")) problems.push("注入消息缺少附件路径");
+      if (folded.decision.messages[0]?.source?.kind !== "user") problems.push("注入消息 source 应为 user");
+      // reject / 无认领消息 / 空暂存 → 不消费
+      const r1 = mod.foldPendingAttachments({ kind: "reject", messages: [] }, { messages: claimed }, [{ relPath: "p", name: "n", size: 1 }]);
+      if (r1.consumed) problems.push("reject 决策不应消费暂存");
+      const r2 = mod.foldPendingAttachments({ kind: "enter", messages: [{ id: "u1" }] }, { messages: [] }, [{ relPath: "p", name: "n", size: 1 }]);
+      if (r2.consumed) problems.push("无认领消息不应消费暂存");
+      const r3 = mod.foldPendingAttachments({ kind: "enter", messages: [{ id: "u1" }] }, { messages: claimed }, []);
+      if (r3.consumed) problems.push("空暂存不应消费");
 
       // 405
-      const badMethod = await callUpload(handler, { method: "PUT", body: "x" });
+      const badMethod = await callUpload(stash, { method: "PUT", body: "x" });
       if (badMethod.status !== 405) problems.push(`PUT 未被 405 拒绝：HTTP ${badMethod.status}`);
 
       return problems;
     } finally {
       removeEntryStubs(created);
+      if (savedDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = savedDshHome;
       rmSync(tmp, { recursive: true, force: true });
     }
   },
@@ -884,11 +936,17 @@ function makeVisionFetchStub() {
         const decBody = JSON.parse(opts?.body ?? "{}");
         return { ok: true, json: async () => ({ ok: true, provider: decBody.provider || "stub", model: decBody.model || "stub", removed: decBody.remove === true, input: decBody.remove === true ? undefined : ["text", "image"], restartRequired: true }) };
       }
-      // 文件上传路由：GET 空列表 / DELETE 成功 / POST 返回 stub 文件。
-      if (typeof url === "string" && url.includes("/api/dsh-rider-upload")) {
+      // 文件暂存路由：GET 空列表 / DELETE 成功 / POST 返回 stub 文件。
+      if (typeof url === "string" && url.includes("/api/dsh-rider-stash/restage")) {
+        return { ok: true, json: async () => ({ ok: true, file: { relPath: ".dsh/uploads/260816-120000-r.txt", size: 4 } }) };
+      }
+      if (typeof url === "string" && url.includes("/api/dsh-rider-stash/read")) {
+        return { ok: true, json: async () => ({ ok: true, dataBase64: "c3R1Yg==", size: 4 }) };
+      }
+      if (typeof url === "string" && url.includes("/api/dsh-rider-stash")) {
         if (method === "GET") return { ok: true, json: async () => ({ ok: true, files: [] }) };
-        if (method === "DELETE") return { ok: true, json: async () => ({ ok: true, removed: [] }) };
-        return { ok: true, json: async () => ({ ok: true, file: { id: "u1", name: "stub.txt", size: 4, mediaType: "text/plain", path: "C:\\stub\\u1.txt", createdAt: Date.now() } }) };
+        if (method === "DELETE") return { ok: true, json: async () => ({ ok: true, cleared: true }) };
+        return { ok: true, json: async () => ({ ok: true, file: { relPath: ".dsh/uploads/260816-120000-stub.txt", name: "stub.txt", size: 4 } }) };
       }
       // GET：返回当前 resolved/user 快照。
       if (method === "GET") {
@@ -912,10 +970,42 @@ function makeVisionFetchStub() {
   };
 }
 
+/** 最小 document stub：installDropzone 的遮罩 DOM 创建在 vm 沙箱内可用。 */
+function makeDocumentStub() {
+  const makeEl = () => {
+    const el = {
+      style: { cssText: "" },
+      dataset: {},
+      children: [],
+      append(...kids) { for (const kid of kids) this.children.push(kid); },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener() {},
+      removeEventListener() {},
+      remove() {},
+    };
+    return el;
+  };
+  return {
+    body: makeEl(),
+    createElement: () => makeEl(),
+    createTextNode: (text) => ({ textContent: text }),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+}
+
 /** 在 vm 沙箱执行 client bundle，返回 factory 产物与 load 记录。fetchStub 注入 globalThis。 */
 function loadClientBundle(code, fetchStub) {
   let handoff = null;
-  const sandbox = { window: { __ModuleLoader__: { load: (h) => { handoff = h; } } }, console };
+  const sandbox = {
+    window: {
+      __ModuleLoader__: { load: (h) => { handoff = h; } },
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    document: makeDocumentStub(),
+    console,
+  };
   if (fetchStub !== undefined) sandbox.fetch = fetchStub;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -935,6 +1025,15 @@ function runClientApply(mod) {
     locale: {
       register: (ns, dicts) => { localeRegistrations.push({ ns, dicts }); },
       bind: (ns) => (key) => localeRegistrations.find((r) => r.ns === ns)?.dicts.zh?.[key] ?? key,
+    },
+    // 会话注册表 stub：cwd 解析器（stash 落盘位置）冒烟用。
+    sessions: {
+      list: {
+        getSnapshot: () => ({
+          current: "sess-1",
+          byId: { "sess-1": { id: "sess-1", cwd: "C:\\ws\\sess-1" } },
+        }),
+      },
     },
     slots: {
       // 真实 slots.inject 的 callback 可返回单 entry（箭头函数 `() => register(...)`，
@@ -984,8 +1083,8 @@ const clientExecuteGate = gate(
       return [`client bundle 执行失败：${error.message}`];
     }
     if (mod.name !== "dsh-rider") problems.push(`client 导出 name 不符：${mod.name}`);
-    if (!Array.isArray(mod.inject) || !["slots", "locale"].every((s) => mod.inject.includes(s))) {
-      problems.push(`client inject 未声明全部服务（slots/locale）：${JSON.stringify(mod.inject)}`);
+    if (!Array.isArray(mod.inject) || !["slots", "locale", "sessions"].every((s) => mod.inject.includes(s))) {
+      problems.push(`client inject 未声明全部服务（slots/locale/sessions）：${JSON.stringify(mod.inject)}`);
     }
     if (mod.inject.includes("settingsScope")) problems.push("client inject 不应再声明 settingsScope（已改自建路由）");
     if (typeof mod.apply !== "function") return [...problems, "client 未导出 apply"];
@@ -994,7 +1093,7 @@ const clientExecuteGate = gate(
     await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel", "composerUploadToggle", "composerUploadHint", "uploadDirLabel", "uploadDirHint", "uploadMaxMBLabel", "uploadMaxMBHint", "uploadTitle", "uploadDescription", "uploadHint", "uploadInsert", "uploadInserted", "uploadCopyPath", "uploadCopied", "uploadDelete", "uploadDeleteFailed", "uploadTooLarge", "uploadFailed", "uploading", "uploadedTitle", "uploadedEmpty", "uploadedRefresh", "uploadedClear", "uploadedClearing", "uploadedListFailed"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel", "composerUploadToggle", "composerUploadHint", "uploadMaxMBLabel", "uploadMaxMBHint", "attachTitle", "attachStaging", "attachStashFailed", "attachTooLarge", "attachNoCwd", "attachRemove", "attachCopyRef", "attachRefCopied", "attachClear", "attachClearing", "attachRestaged", "attachButton", "dropTitle", "dropSub"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
     const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
@@ -1040,15 +1139,19 @@ const clientExecuteGate = gate(
         const discarded = store.getSnapshot();
         if (discarded.dirty !== false || discarded.visionProvider?.text !== "") problems.push(`丢弃后设置页状态异常：${JSON.stringify(discarded)}`);
       }
-      // 两个挂载点：settings.section（设置页）+ conversation.input.dock（composer 粘贴捕获）。
+      // 三个挂载点：settings.section（设置页）+ conversation.input.dock（粘贴捕获/附件卡片）
+      // + conversation.input.left（回形针按钮）。
       const injectedKeys = slotInjections.map((s) => s.key).sort();
-      const expectedKeys = ["conversation.input.dock", "settings.section"];
-      if (injectedKeys.length !== 2 || !expectedKeys.every((k) => injectedKeys.indexOf(k) >= 0)) {
-        problems.push(`slots.inject 应挂载 settings.section 与 conversation.input.dock：${JSON.stringify(slotInjections)}`);
+      const expectedKeys = ["conversation.input.dock", "conversation.input.left", "settings.section"];
+      if (injectedKeys.length !== 3 || !expectedKeys.every((k) => injectedKeys.indexOf(k) >= 0)) {
+        problems.push(`slots.inject 应挂载 settings.section 与 conversation.input.dock/left：${JSON.stringify(slotInjections)}`);
       }
       const dock = slotRegistrations.find((r) => r.opts && r.opts.name === "conversation.input.dock" && r.opts.id === "dsh-rider-composer-vision");
       if (!dock) problems.push("未注册 conversation.input.dock / dsh-rider-composer-vision（composer 粘贴捕获）");
       else if (typeof dock.component !== "function") problems.push("dock entry component 不是函数（应为 ComposerVisionDock）");
+      const left = slotRegistrations.find((r) => r.opts && r.opts.name === "conversation.input.left" && r.opts.id === "dsh-rider-attach");
+      if (!left) problems.push("未注册 conversation.input.left / dsh-rider-attach（回形针按钮）");
+      else if (typeof left.component !== "function") problems.push("left entry component 不是函数（应为 AttachButton）");
     }
     return problems;
   },
@@ -1151,7 +1254,7 @@ const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1] : null;
 let failed = 0;
 
-for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, uploadExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
+for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, stashExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
   if (only && g.name !== only) continue;
   const self = await g.selfTest();
   if (self.length > 0) {

@@ -75,30 +75,24 @@ window.__ModuleLoader__.load({
       imageCopied: 'Copied',
       modelUsed: 'model',
       imageNoModel: 'No vision model configured — set visionProvider/visionModel above, or ensure a provider declares an image-capable model.',
-      composerUploadToggle: 'Capture file drag/paste in the composer (upload)',
-      composerUploadHint: 'When on, dragging or pasting a non-image file into the composer uploads it via dsh-rider and shows a file card above the input — insert the absolute path into your message and the agent reads the file with its own fs/pwsh tools. Images are unaffected (vision capture or native attach).',
-      uploadDirLabel: 'Upload directory',
-      uploadDirHint: 'Where uploaded files are stored. Leave empty for the default (~/.dsh-rider/uploads).',
-      uploadMaxMBLabel: 'Max upload size (MB)',
-      uploadMaxMBHint: 'Per-file size limit; 0 = default (50 MB).',
-      uploadTitle: 'File upload',
-      uploadDescription: 'Drag any non-image file into the composer, or paste a file copied from Explorer — dsh-rider uploads it to the local uploads dir and inserts the absolute path into your message, so the agent reads the file content with its own tools. Images keep their native/vision path.',
-      uploadHint: 'Uploaded files live on this machine (default ~/.dsh-rider/uploads). The message stays plain text — no DSH attachment gate involved.',
-      uploadInsert: 'Insert path',
-      uploadInserted: 'Inserted',
-      uploadCopyPath: 'Copy path',
-      uploadCopied: 'Copied',
-      uploadDelete: 'Delete',
-      uploadDeleteFailed: 'Delete failed',
-      uploadTooLarge: 'File too large',
-      uploadFailed: 'Upload failed',
-      uploading: 'Uploading…',
-      uploadedTitle: 'Uploaded files',
-      uploadedEmpty: 'No uploaded files yet — drag a file into the composer.',
-      uploadedRefresh: 'Refresh',
-      uploadedClear: 'Clear all',
-      uploadedClearing: 'Clearing…',
-      uploadedListFailed: 'Failed to load uploaded files',
+      composerUploadToggle: 'Capture file drag/paste in the composer (stash)',
+      composerUploadHint: 'When on, dragging or pasting files (any type) into the window stashes them into the session workspace via dsh-rider — cards appear above the input, and the attachment list is injected into the next message automatically (the draft stays clean). Images keep their vision/native path on paste; drop/button stash them too.',
+      uploadMaxMBLabel: 'Max stash size (MB)',
+      uploadMaxMBHint: 'Per-file size limit; 0 = default (32 MB). Larger files: put them in the project directory and write the path in your message.',
+      attachTitle: 'Attachments',
+      attachStaging: 'Stashing…',
+      attachStashFailed: 'Stash failed',
+      attachTooLarge: 'File too large',
+      attachNoCwd: 'Session has no workspace — cannot stash files',
+      attachRemove: 'Remove',
+      attachCopyRef: 'Copy reference',
+      attachRefCopied: 'Copied',
+      attachClear: 'Clear all',
+      attachClearing: 'Clearing…',
+      attachRestaged: 'Attachments re-staged from pasted reference lines',
+      attachButton: 'Attach files',
+      dropTitle: 'Release to stash attachments',
+      dropSub: 'Files land in the session workspace and ride along with your next message',
       composerCaptureToggle: 'Capture pasted/dropped images in the composer',
       composerCaptureHint: 'When on, pasting or dropping an image into the composer sends it straight to the vision model and shows the description above the input (the image is NOT attached to the message — bypassing DSH\'s image gate on text-only models). Useful for text-only models; turn off to use native paste-to-attach on image-capable models.',
       composerTitle: 'Pasted image \u2192 vision',
@@ -147,30 +141,24 @@ window.__ModuleLoader__.load({
       imageCopied: '已复制',
       modelUsed: '模型',
       imageNoModel: '未配置视觉模型——请在上方填写 visionProvider/visionModel，或确保某提供商声明了支持图片的模型。',
-      composerUploadToggle: '在对话输入框捕获拖拽/粘贴的文件并上传',
-      composerUploadHint: '开启后，在对话输入框拖入或粘贴非图片文件时，dsh-rider 会把文件上传到本机并在输入框上方显示文件卡片——点「插入路径」把绝对路径写进消息，agent 用自己的 fs/pwsh 工具读取内容。图片不受影响（走视觉捕获或原生附件）。',
-      uploadDirLabel: '上传目录',
-      uploadDirHint: '上传文件的存放位置。留空用默认（~/.dsh-rider/uploads）。',
-      uploadMaxMBLabel: '单文件大小上限（MB）',
-      uploadMaxMBHint: '单个文件的大小上限，0 = 默认（50 MB）。',
-      uploadTitle: '文件上传',
-      uploadDescription: '把任意非图片文件拖入对话输入框，或在输入框粘贴（从资源管理器复制的）文件——dsh-rider 把文件上传到本机上传目录，并把绝对路径插入消息，agent 收到后用 fs/pwsh 工具直接读文件内容。图片保持原行为（视觉捕获或原生附件）。',
-      uploadHint: '上传文件保存在本机（默认 ~/.dsh-rider/uploads）。消息保持纯文本——不触发 DSH 的附件准入拦截。',
-      uploadInsert: '插入路径',
-      uploadInserted: '已插入',
-      uploadCopyPath: '复制路径',
-      uploadCopied: '已复制',
-      uploadDelete: '删除',
-      uploadDeleteFailed: '删除失败',
-      uploadTooLarge: '文件过大',
-      uploadFailed: '上传失败',
-      uploading: '上传中…',
-      uploadedTitle: '已上传文件',
-      uploadedEmpty: '还没有上传的文件——把文件拖入对话输入框即可上传。',
-      uploadedRefresh: '刷新',
-      uploadedClear: '全部清除',
-      uploadedClearing: '清除中…',
-      uploadedListFailed: '读取已上传文件失败',
+      composerUploadToggle: '在对话窗口捕获拖拽/粘贴的文件并暂存',
+      composerUploadHint: '开启后，把任意类型文件拖入窗口或粘贴（从资源管理器复制的）文件时，dsh-rider 会把文件暂存到会话工作区并在输入框上方显示卡片——附件清单随下一条消息自动注入模型（草稿保持干净）。粘贴图片仍走视觉捕获/原生附件；拖入与文件选择器的图片同样暂存成卡片。',
+      uploadMaxMBLabel: '单文件暂存上限（MB）',
+      uploadMaxMBHint: '单个文件的大小上限，0 = 默认（32 MB）。更大的文件请直接放进项目目录后在消息里写路径。',
+      attachTitle: '附件',
+      attachStaging: '暂存中…',
+      attachStashFailed: '暂存失败',
+      attachTooLarge: '文件过大',
+      attachNoCwd: '会话没有工作区，无法暂存文件',
+      attachRemove: '移除',
+      attachCopyRef: '复制引用',
+      attachRefCopied: '已复制',
+      attachClear: '全部清除',
+      attachClearing: '清除中…',
+      attachRestaged: '已从粘贴的引用行重新挂载附件',
+      attachButton: '添加附件',
+      dropTitle: '释放以暂存附件',
+      dropSub: '文件进入会话工作区，随下一条消息一起发送',
       composerCaptureToggle: '在对话输入框捕获粘贴/拖拽的图片',
       composerCaptureHint: '开启后，在对话输入框粘贴或拖入图片时，dsh-rider 会直接把图片发给视觉模型并在输入框上方显示描述（图片不会作为消息附件发送，绕开 DSH 对纯文本模型的图片拦截）。纯文本会话模型适用；若会话模型支持图片且想用原生粘贴附件，请关闭此项。',
       composerTitle: '粘贴图片 \u2192 视觉理解',
@@ -197,7 +185,7 @@ window.__ModuleLoader__.load({
 
     /** 内部标记：该字段将清除（re-inherit composition layer）。 */
     const CLEAR = '\u0000clear'
-    const FIELDS = ['visionProvider', 'visionModel', 'visionPrompt', 'uploadDir', 'uploadMaxBytes']
+    const FIELDS = ['visionProvider', 'visionModel', 'visionPrompt', 'uploadMaxBytes']
 
     function isRecord(value) {
       return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -253,7 +241,6 @@ window.__ModuleLoader__.load({
           visionProvider: this.fieldState('visionProvider'),
           visionModel: this.fieldState('visionModel'),
           visionPrompt: this.fieldState('visionPrompt'),
-          uploadDir: this.fieldState('uploadDir'),
           uploadMaxBytes: this.fieldState('uploadMaxBytes'),
         }
       }
@@ -530,6 +517,70 @@ window.__ModuleLoader__.load({
       return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
     }
 
+    /** 文件 → base64（分块防栈溢出）。 */
+    function fileToBase64(file) {
+      return new Promise((resolveBody, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const result = String(reader.result ?? '')
+          resolveBody(result.startsWith('data:') ? result.slice(result.indexOf(',') + 1) : result)
+        }
+        reader.onerror = () => reject(new Error('read failed'))
+        reader.readAsDataURL(file)
+      })
+    }
+
+    /** 粘贴文本里的附件引用行：`📎 名称（大小）→ .dsh/uploads/…`。 */
+    const REF_LINE = /^📎\s*.+?→\s*(\.dsh\/uploads\/\S+)/u
+
+    /**
+     * 附件暂存协调 store（模块级单例）。
+     * 卡片真相源在宿主端（pending / listStash）；本 store 只做：
+     *  - bump(sessionId)：落盘成功/移除后递增版本，通知卡片重取 listStash；
+     *  - preview：图片卡的本地缩略图（objectURL，页生命周期）；
+     *  - staging：暂存中的乐观条目（上传中的卡片状态）；
+     *  - capture/current：槽组件渲染时回写「当前可见 composer」的会话上下文，
+     *    供全窗拖拽/粘贴这类无槽位标准 props 的入口路由到正确会话。
+     */
+    const uploadsStore = {
+      versions: new Map(),
+      previews: new Map(),
+      staging: new Map(), // sessionId → [{key, name, size}]
+      listeners: new Set(),
+      captured: undefined, // {sessionId}
+      cwdResolver: undefined, // (sessionId) => cwd | undefined（apply 时注入）
+      version(sessionId) { return this.versions.get(sessionId) ?? 0 },
+      preview(relPath) { return this.previews.get(relPath) },
+      setPreview(relPath, url) { this.previews.set(relPath, url) },
+      setCwdResolver(fn) { this.cwdResolver = fn },
+      cwd(sessionId) { return this.cwdResolver ? this.cwdResolver(sessionId) : undefined },
+      bump(sessionId) {
+        this.versions.set(sessionId, (this.versions.get(sessionId) ?? 0) + 1)
+        this.emit()
+      },
+      stage(sessionId, file) {
+        const key = `${sessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`
+        const list = this.staging.get(sessionId) ?? []
+        this.staging.set(sessionId, [...list, { key, name: file.name, size: file.size }])
+        this.emit()
+        return key
+      },
+      unstage(sessionId, key) {
+        const list = this.staging.get(sessionId) ?? []
+        const next = list.filter((item) => item.key !== key)
+        if (next.length === 0) this.staging.delete(sessionId)
+        else this.staging.set(sessionId, next)
+        this.emit()
+      },
+      capture(entry) { this.captured = entry },
+      current() { return this.captured },
+      subscribe(listener) {
+        this.listeners.add(listener)
+        return () => this.listeners.delete(listener)
+      },
+      emit() { for (const listener of [...this.listeners]) listener() },
+    }
+
     /** 把文本插入受控 textarea（React 合成事件经 input 事件驱动），保持光标。 */
     function insertIntoTextarea(el, text) {
       if (!el || typeof text !== 'string') return false
@@ -582,23 +633,19 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 对话 composer 级粘贴/拖拽捕获（图片 → 视觉理解；非图片文件 → 上传 + 路径引用）。
+     * 对话 composer 级捕获与附件卡片（图片 → 视觉理解；文件 → stash 暂存）。
      *
-     * 挂在 `conversation.input.dock`（session 级，composer 卡片上方一整行）——但**渲染
-     * 零 inline 占位**：所有可见输出经 createPortal 画到 document.body 上的浮层
-     * （对齐 dsh-ads AdLayer 的 dock+portal 模式：slot 只是带 React 生命周期、且把层
-     * 绑定到 open session 而非泄漏全局）。组件本身：
-     *  - 轮询找到 composer 元素（textarea/contenteditable，取最靠下的、排除对话框内），
-     *    在 capture 阶段拦截 paste；drop/dragover 挂 document capture——capture 先于
-     *    InputBar 的 document bubble listener，且只有「composer 范围内」（composedPath
-     *    含 composerEl，或其祖先 contains composerEl）的文件拖拽才处理，设置页/弹窗的
-     *    拖放完全放行：
-     *      - 图片 → 视觉理解（composerVisionStore 开关；开启则 preventDefault 赢过原生
-     *        粘贴/拖放路径，关闭则放行给原生图片附件）；
-     *      - 非图片文件 → 上传（composerUploadStore 开关）到 Node half 的
-     *        /api/dsh-rider-upload 路由，浮层文件卡片可「插入路径」（绝对路径写进
-     *        composer，消息纯文本，agent 用 fs/pwsh 工具读文件）/「复制路径」/「删除」。
-     *  - 文字粘贴不拦截，正常落入 composer；
+     * 挂在 `conversation.input.dock`（session 级）——渲染零 inline 占位，所有可见
+     * 输出经 createPortal 画到 document.body 上的浮层（对齐 dsh-ads AdLayer 的
+     * dock+portal 模式）。组件职责：
+     *  - 轮询找到 composer 元素（textarea，取最靠下的、排除对话框内）；
+     *  - paste（capture，composerEl 上）：纯图片 → 视觉理解（composerVisionStore
+     *    开关；关闭则放行原生）；含非图片文件 → 整批 stash（composerUploadStore）；
+     *  - 附件卡片真相源为宿主 pending（listStash 轮询 2s + store.bump 即时刷新），
+     *    发送消费后卡片自动消失；卡片可「移除」「复制引用」（📎 引用行，粘贴可
+     *    重新物化）「全部清除」；暂存中的乐观条目（staging）实时显示；
+     *  - 渲染时回写 store.captured（当前 composer 会话上下文），供全窗拖放/粘贴/
+     *    回形针按钮这些无槽位 props 的入口路由到正确会话。
      *  - 切换 session（sessionId 变）重置进行中的任务。
      * 复用 fileToDataURL / resultBoxStyle / mutedStyle / metaStyle / errorStyle / Button。
      */
@@ -607,9 +654,41 @@ window.__ModuleLoader__.load({
       const [composerEl, setComposerEl] = useState(null)
       const [anchor, setAnchor] = useState(null) // {left, width, bottomGap}
       const [task, setTask] = useState(null)    // 视觉任务 {id, preview?, name?, status, text?, model?, provider?, note?, error?}
-      const [uploads, setUploads] = useState([]) // 上传任务 {id, file, status, path?, size?, error?, tooLarge?}
-      const [insertedId, setInsertedId] = useState(null)
+      const [stashed, setStashed] = useState([]) // 宿主 pending 卡片 [{relPath, name, size}]
+      const [staging, setStaging] = useState([]) // 暂存中乐观条目 [{key, name, size}]
+      const [version, setVersion] = useState(0)
+      const [copiedKey, setCopiedKey] = useState(null)
+      const [notice, setNotice] = useState(null) // {kind:'error'|'info', text}
       const reqId = useRef(0)
+      const key = typeof sessionId === 'string' ? sessionId : undefined
+
+      /** 回写「当前可见 composer」的会话上下文（全窗入口路由用）。 */
+      useEffect(() => {
+        uploadsStore.capture(key ? { sessionId: key } : undefined)
+        return () => { if (uploadsStore.current()?.sessionId === key) uploadsStore.capture(undefined) }
+      }, [key])
+
+      /** 订阅 store：staging 乐观条目 + version 变化（重拉 listStash）。 */
+      useEffect(() => uploadsStore.subscribe(() => {
+        setVersion(uploadsStore.version(key))
+        setStaging(key ? (uploadsStore.staging.get(key) ?? []) : [])
+      }), [key])
+
+      /** 拉取宿主 pending：version 变化即时 + 2s 轮询兜底（发送消费后卡片消失）。 */
+      useEffect(() => {
+        if (!key) return
+        let alive = true
+        const load = async () => {
+          try {
+            const r = await fetch(`/api/dsh-rider-stash?sessionId=${encodeURIComponent(key)}`, { headers: { accept: 'application/json' } })
+            const body = await r.json()
+            if (alive && body && body.ok === true) setStashed(Array.isArray(body.files) ? body.files : [])
+          } catch { /* 轮询失败静默 */ }
+        }
+        void load()
+        const timer = setInterval(load, 2000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [key, version])
 
       /** 找 composer 元素并更新锚点；composer 切换时 reattach（经 composerEl effect）。 */
       useEffect(() => {
@@ -642,90 +721,55 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
-      /** 事件是否落在 composer 范围内：composedPath 含 composerEl，或某祖先 contains 它
-       *  （拖到 composer 卡片空白/附件栏也算；设置页/弹窗的路径不含 composerEl，放行）。 */
-      const isComposerEvent = (e) => {
-        if (!composerEl) return false
-        const path = typeof e.composedPath === 'function' ? e.composedPath() : [e.target]
-        return path.some((node) => node === composerEl ||
-          (node && typeof node.contains === 'function' && node.contains(composerEl)))
+      /**
+       * 把一批文件整批暂存：base64 JSON POST /api/dsh-rider-stash；图片同时生成
+       * 本地缩略图（store.preview）；失败经浮层 notice 报告，不静默。
+       * 复用模块级 stashFilesFor（按 sessionId 路由）。
+       */
+      async function stashFiles(files) {
+        if (!key) return
+        if (!uploadsStore.cwd(key)) { setNotice({ kind: 'error', text: t('attachNoCwd') }); return }
+        await stashFilesFor(key, files, (message) => setNotice({ kind: 'error', text: message }))
       }
 
-      /** 分发文件：图片 → 视觉理解（开关）；非图片 → 上传（开关）。返回是否已接管。 */
-      const takeFile = (file) => {
-        if (!file) return false
-        if (file.type && file.type.startsWith('image/')) {
-          if (!composerVisionStore.getEnabled()) return false
-          void runUnderstand(file)
-          return true
-        }
-        if (!composerUploadStore.getEnabled()) return false
-        void runUpload(file)
-        return true
-      }
-
-      /** paste（capture，composerEl 上）+ drop/dragover（document capture，先于 InputBar
-       *  的 document bubble）拦截；命中即 preventDefault + stopImmediatePropagation。 */
+      /** paste（capture，composerEl 上）：纯图片 → 视觉（开关）；含非图片 → 整批 stash。 */
       useEffect(() => {
         if (!composerEl) return
         const onPaste = (e) => {
           const items = e.clipboardData && e.clipboardData.items
           if (!items) return
-          let took = false
+          const files = []
           for (const item of items) {
             if (!item.kind || item.kind !== 'file') continue
             const file = item.getAsFile && item.getAsFile()
-            if (file && takeFile(file)) { took = true; break }
+            if (file) files.push(file)
           }
-          if (took) {
-            e.preventDefault()
-            e.stopPropagation()
-            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
+          if (files.length === 0) return
+          const hasNonImage = files.some((file) => !(file.type || '').startsWith('image/'))
+          if (!hasNonImage) {
+            // 纯图片：视觉捕获（开关），关闭则放行原生粘贴附件
+            if (!composerVisionStore.getEnabled()) return
+            void runUnderstand(files[0])
+          } else {
+            // 含非图片文件：整批 stash（图片也落盘，缩略图预览）
+            if (!composerUploadStore.getEnabled()) return
+            void stashFiles(files)
           }
-        }
-        const onDrop = (e) => {
-          if (!isComposerEvent(e)) return
-          const files = e.dataTransfer && e.dataTransfer.files
-          if (!files || files.length === 0) return
-          let took = false
-          let tookImage = false
-          for (const file of Array.from(files)) {
-            if (file.type && file.type.startsWith('image/')) {
-              // 多图只处理第一张（保持单图视觉路径），非图片文件逐个上传
-              if (tookImage) continue
-              if (takeFile(file)) { took = true; tookImage = true }
-            } else if (takeFile(file)) {
-              took = true
-            }
-          }
-          if (took) {
-            e.preventDefault()
-            e.stopPropagation()
-            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
-          }
-        }
-        const onDragOver = (e) => {
-          if (!isComposerEvent(e)) return
-          const types = e.dataTransfer && e.dataTransfer.types
-          if (types && Array.from(types).indexOf('Files') >= 0) e.preventDefault()
+          e.preventDefault()
+          e.stopPropagation()
+          if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation()
         }
         composerEl.addEventListener('paste', onPaste, true)
-        document.addEventListener('drop', onDrop, true)
-        document.addEventListener('dragover', onDragOver, true)
-        return () => {
-          composerEl.removeEventListener('paste', onPaste, true)
-          document.removeEventListener('drop', onDrop, true)
-          document.removeEventListener('dragover', onDragOver, true)
-        }
+        return () => composerEl.removeEventListener('paste', onPaste, true)
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [composerEl, sessionId])
 
-      /** 切换 session：作废进行中的任务并清空浮层。 */
+      /** 切换 session：作废进行中的视觉任务并清空浮层状态。 */
       useEffect(() => {
         reqId.current += 1
         setTask(null)
-        setUploads([])
-        setInsertedId(null)
+        setNotice(null)
+        setCopiedKey(null)
       }, [sessionId])
 
       /** 把图片走 dsh-rider 自建 /understand 路由；reqId 防陈旧结果覆盖。 */
@@ -761,84 +805,47 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** 把非图片文件二进制 POST 到 /api/dsh-rider-upload；reqId 防陈旧结果覆盖。
-       *  成功返回绝对路径（file.path），agent 用 fs/pwsh 工具直接读。 */
-      async function runUpload(file) {
-        const myId = (reqId.current += 1)
-        setUploads((prev) => [...prev, { id: myId, file, status: 'busy' }])
+      /** 撤回一个暂存附件（卡片 ×）：DELETE /api/dsh-rider-stash → bump 刷新。 */
+      const removeStash = useCallback(async (relPath) => {
+        if (!key) return
+        const cwd = uploadsStore.cwd(key)
+        if (!cwd) return
         try {
-          const bytes = await file.arrayBuffer()
-          const response = await fetch('/api/dsh-rider-upload', {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/octet-stream',
-              'x-file-name': encodeURIComponent(String(file.name || 'file')),
-              'x-file-type': String(file.type || 'application/octet-stream'),
-            },
-            body: bytes,
-          })
-          let body = {}
-          try { body = await response.json() } catch { body = {} }
-          if (reqId.current !== myId) return
-          if (!body || body.ok !== true) {
-            setUploads((prev) => prev.map((u) => u.id === myId ? {
-              ...u,
-              status: 'error',
-              tooLarge: response.status === 413,
-              error: (body && body.message) || t('uploadFailed'),
-            } : u))
-            return
-          }
-          setUploads((prev) => prev.map((u) => u.id === myId ? {
-            ...u,
-            status: 'done',
-            path: body.file && body.file.path,
-            size: body.file && body.file.size,
-          } : u))
-        } catch (error) {
-          if (reqId.current !== myId) return
-          setUploads((prev) => prev.map((u) => u.id === myId ? {
-            ...u,
-            status: 'error',
-            error: error instanceof Error ? error.message : String(error),
-          } : u))
-        }
-      }
-
-      /** 把上传文件的绝对路径插入 composer（React 受控 textarea 经 input 事件驱动）。 */
-      const insertPath = useCallback((uploadId) => {
-        const entry = uploads.find((u) => u.id === uploadId)
-        if (!entry || !entry.path) return
-        if (insertIntoTextarea(composerEl, entry.path)) {
-          setInsertedId(uploadId)
-          setTimeout(() => setInsertedId((prev) => prev === uploadId ? null : prev), 1600)
-        }
-      }, [uploads, composerEl])
-
-      /** 复制上传文件的绝对路径到剪贴板。 */
-      const copyUploadPath = useCallback(async (uploadId) => {
-        const entry = uploads.find((u) => u.id === uploadId)
-        if (!entry || !entry.path) return
-        try { await navigator.clipboard.writeText(entry.path) } catch {
-          // 复制失败静默
-        }
-      }, [uploads])
-
-      /** 服务端删除上传文件并从浮层移除。 */
-      const removeUpload = useCallback(async (uploadId) => {
-        const entry = uploads.find((u) => u.id === uploadId)
-        setUploads((prev) => prev.filter((u) => u.id !== uploadId))
-        if (!entry || !entry.path) return
-        try {
-          await fetch('/api/dsh-rider-upload', {
+          await fetch('/api/dsh-rider-stash', {
             method: 'DELETE',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id: entry.id }),
+            body: JSON.stringify({ cwd, sessionId: key, relPath }),
           })
-        } catch {
-          // 删除失败静默（本地条目已移除）
-        }
-      }, [uploads])
+          uploadsStore.bump(key)
+        } catch { /* 失败静默：轮询会纠正 */ }
+      }, [key])
+
+      /** 清空本会话暂存并删除未发送落盘文件。 */
+      const clearStash = useCallback(async () => {
+        if (!key) return
+        const cwd = uploadsStore.cwd(key)
+        if (!cwd) return
+        try {
+          await fetch('/api/dsh-rider-stash', {
+            method: 'DELETE',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ cwd, sessionId: key, clear: true }),
+          })
+          uploadsStore.bump(key)
+        } catch { /* 失败静默 */ }
+      }, [key])
+
+      /** 附件 wire 格式引用行（粘贴回 composer 可重新物化）。 */
+      const refLine = useCallback((file) => `\u{1F4CE} ${file.name}（${formatBytes(file.size)}）→ ${file.relPath}`, [])
+
+      /** 复制引用行到剪贴板。 */
+      const copyRef = useCallback(async (file) => {
+        try {
+          await navigator.clipboard.writeText(refLine(file))
+          setCopiedKey(file.relPath)
+          setTimeout(() => setCopiedKey((prev) => prev === file.relPath ? null : prev), 1600)
+        } catch { /* 复制失败静默 */ }
+      }, [refLine])
 
       const onCopy = useCallback(async () => {
         if (!task || !task.text) return
@@ -847,7 +854,8 @@ window.__ModuleLoader__.load({
         }
       }, [task])
 
-      if (!task && uploads.length === 0) return null
+      const cardCount = stashed.length + staging.length
+      if (!task && cardCount === 0 && !notice) return null
 
       const cardStyle = Object.assign({}, dockCardStyle)
       if (anchor) {
@@ -860,34 +868,79 @@ window.__ModuleLoader__.load({
         cardStyle.width = 360
       }
 
-      const uploadFileRowStyle = {
+      const fileRowStyle = {
         display: 'flex',
-        flexDirection: 'column',
-        gap: 4,
-        padding: '8px 0',
+        alignItems: 'center',
+        gap: 8,
+        minWidth: 0,
+        padding: '6px 0',
         borderTop: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
       }
-      const uploadRowHeadStyle = { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }
-      const uploadNameStyle = { flex: 1, minWidth: 0, margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
-      const uploadMetaStyle = { flexShrink: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)' }
-      const uploadPathStyle = {
-        margin: 0,
-        fontSize: 11,
-        color: 'var(--dsw-alias-label-tertiary, inherit)',
-        fontFamily: 'ui-monospace, monospace',
+      const fileMainStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }
+      const fileNameStyle = { margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+      const fileMetaStyle = { margin: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+      const extTileStyle = {
+        flexShrink: 0,
+        minWidth: 34,
+        height: 34,
+        padding: '0 6px',
+        boxSizing: 'border-box',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 8,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: '.5px',
+        color: 'var(--dsw-alias-label-secondary, inherit)',
+        background: 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.12))',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
+        textTransform: 'uppercase',
         overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        direction: 'rtl',
-        textAlign: 'left',
       }
-      const uploadActionsStyle = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }
+      const thumbStyle = {
+        flexShrink: 0,
+        width: 34,
+        height: 34,
+        borderRadius: 8,
+        objectFit: 'cover',
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
+      }
+
+      /** 扩展名图块文本（≤5 字符，否则 FILE）。 */
+      function extLabel(name) {
+        const dot = String(name).lastIndexOf('.')
+        const ext = dot >= 0 ? String(name).slice(dot + 1) : ''
+        return ext.length > 0 && ext.length <= 5 ? ext : 'FILE'
+      }
+
+      const stashedRows = stashed.map((file) => {
+        const preview = uploadsStore.preview(file.relPath)
+        return h('div', { key: file.relPath, style: fileRowStyle },
+          preview
+            ? h('img', { src: preview, alt: file.name, style: thumbStyle })
+            : h('div', { style: extTileStyle }, extLabel(file.name)),
+          h('div', { style: fileMainStyle },
+            h('p', { style: fileNameStyle, title: file.name }, file.name),
+            h('p', { style: fileMetaStyle }, formatBytes(file.size)),
+          ),
+          h(Button, { variant: 'ghost', size: 'sm', onClick: () => copyRef(file) }, copiedKey === file.relPath ? t('attachRefCopied') : t('attachCopyRef')),
+          h(Button, { variant: 'ghost', size: 'sm', onClick: () => removeStash(file.relPath) }, t('attachRemove')),
+        )
+      })
+      const stagingRows = staging.map((item) => h('div', { key: item.key, style: fileRowStyle },
+        h('div', { style: extTileStyle }, extLabel(item.name)),
+        h('div', { style: fileMainStyle },
+          h('p', { style: fileNameStyle, title: item.name }, item.name),
+          h('p', { style: fileMetaStyle }, t('attachStaging') + ' \u00b7 ' + formatBytes(item.size)),
+        ),
+      ))
 
       return createPortal(
         h('div', { style: cardStyle, 'data-dsh-rider-vision-overlay': 'true' },
           h('div', { style: dockHeadStyle },
-            h('span', { style: dockTitleStyle }, task ? t('composerTitle') : t('uploadTitle')),
-            h('button', { type: 'button', onClick: () => { reqId.current += 1; setTask(null); setUploads([]) }, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
+            h('span', { style: dockTitleStyle }, task ? t('composerTitle') : t('attachTitle')),
+            h('button', { type: 'button', onClick: () => { reqId.current += 1; setTask(null); setNotice(null) }, style: dockCloseStyle, 'aria-label': 'close' }, '\u2715'),
           ),
           task && task.preview
             ? h('img', { src: task.preview, alt: task.name || '', style: dockThumbStyle })
@@ -908,33 +961,19 @@ window.__ModuleLoader__.load({
                 task.note ? h('p', { style: mutedStyle }, task.note) : null,
               )
             : null,
-          uploads.map((entry) => {
-            const busy = entry.status === 'busy'
-            const done = entry.status === 'done'
-            return h('div', { key: entry.id, style: uploadFileRowStyle },
-              h('div', { style: uploadRowHeadStyle },
-                h('span', { style: { fontSize: 14, flexShrink: 0 } }, '\U0001F4C4'),
-                h('p', { style: uploadNameStyle, title: entry.file && entry.file.name }, entry.file && entry.file.name),
-                h('span', { style: uploadMetaStyle }, busy ? formatBytes(entry.file && entry.file.size) : (done ? formatBytes(entry.size) : '')),
-              ),
-              busy
-                ? h('p', { style: mutedStyle }, t('uploading'))
-                : null,
-              done
-                ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
-                    h('p', { style: uploadPathStyle, title: entry.path }, entry.path),
-                    h('div', { style: uploadActionsStyle },
-                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => insertPath(entry.id) }, insertedId === entry.id ? t('uploadInserted') : t('uploadInsert')),
-                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => copyUploadPath(entry.id) }, t('uploadCopyPath')),
-                      h(Button, { variant: 'ghost', size: 'sm', onClick: () => removeUpload(entry.id) }, t('uploadDelete')),
-                    ),
-                  )
-                : null,
-              entry.status === 'error'
-                ? h('p', { style: errorStyle }, (entry.tooLarge ? t('uploadTooLarge') + '\uff1a' : t('uploadFailed') + '\uff1a') + (entry.error || ''))
-                : null,
-            )
-          }),
+          notice
+            ? h('p', { style: notice.kind === 'error' ? errorStyle : mutedStyle }, notice.text)
+            : null,
+          cardCount > 0
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
+                h('span', { style: Object.assign({}, dockTitleStyle, { margin: 0 }) }, t('attachTitle') + `\uff08${stashed.length}\uff09`),
+                stashed.length > 0
+                  ? h(Button, { variant: 'ghost', size: 'sm', onClick: clearStash }, t('attachClear'))
+                  : null,
+              )
+            : null,
+          stagingRows,
+          stashedRows,
         ),
         document.body,
       )
@@ -1204,116 +1243,237 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 设置页「已上传文件」管理卡片：GET /api/dsh-rider-upload 列出本机已上传文件
-     * （名称/大小/时间/绝对路径），支持复制路径、单删、全部清除、刷新。上传目录与
-     * 大小上限在上方表单配置（uploadDir / uploadMaxBytes）。
+     * 回形针按钮（conversation.input.left）：打开文件选择器（multi-select，无 accept
+     * 过滤），选中的文件整批 stash（图片也落盘 + 缩略图）。不接 props 的槽位组件，
+     * 通过模块级 store 路由到当前会话。
      */
-    function UploadedFilesCard() {
-      const [files, setFiles] = useState(null) // null = loading
-      const [error, setError] = useState(null)
+    function AttachButton() {
       const [busy, setBusy] = useState(false)
-      const [copiedId, setCopiedId] = useState(null)
-      const [failedId, setFailedId] = useState(null)
-
-      const refresh = async () => {
-        setError(null)
-        try {
-          const r = await fetch('/api/dsh-rider-upload', { headers: { accept: 'application/json' } })
-          const body = await r.json()
-          if (body && body.ok === true) setFiles(Array.isArray(body.files) ? body.files : [])
-          else setError((body && body.message) || t('uploadedListFailed'))
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e))
-        }
+      const inputRef = useRef(null)
+      const onPick = () => {
+        const el = inputRef.current
+        if (el) el.click()
       }
-      useEffect(() => { void refresh() }, [])
-
-      const onDelete = async (id) => {
-        if (busy) return
-        setBusy(true); setFailedId(null)
-        try {
-          const r = await fetch('/api/dsh-rider-upload', {
-            method: 'DELETE',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id }),
-          })
-          const body = await r.json()
-          if (!body || body.ok !== true) setFailedId(id)
-          else setFiles((prev) => (prev || []).filter((f) => f.id !== id))
-        } catch {
-          setFailedId(id)
-        }
-        setBusy(false)
+      const onChange = (e) => {
+        const files = e.target && e.target.files ? Array.from(e.target.files) : []
+        e.target.value = ''
+        if (files.length === 0) return
+        const current = uploadsStore.current()
+        if (!current || !composerUploadStore.getEnabled()) return
+        setBusy(true)
+        void stashFilesFor(current.sessionId, files).finally(() => setBusy(false))
       }
-
-      const onClear = async () => {
-        if (busy) return
-        setBusy(true); setError(null)
-        try {
-          const r = await fetch('/api/dsh-rider-upload', {
-            method: 'DELETE',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ clear: true }),
-          })
-          const body = await r.json()
-          if (!body || body.ok !== true) setError((body && body.message) || t('uploadDeleteFailed'))
-          else setFiles([])
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e))
-        }
-        setBusy(false)
-      }
-
-      const onCopy = async (path, id) => {
-        try {
-          await navigator.clipboard.writeText(path)
-          setCopiedId(id)
-          setTimeout(() => setCopiedId((prev) => prev === id ? null : prev), 1600)
-        } catch {
-          // 复制失败静默
-        }
-      }
-
-      const fileListStyle = { display: 'flex', flexDirection: 'column', gap: 8 }
-      const fileItemStyle = {
-        display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
-        padding: '8px 10px',
-        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+      const btnStyle = {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 30,
+        height: 30,
+        border: 'none',
+        background: 'none',
         borderRadius: 8,
+        cursor: 'pointer',
+        fontSize: 15,
+        lineHeight: 1,
+        color: 'var(--dsw-alias-label-secondary, inherit)',
       }
-      const fileItemMainStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }
-      const fileItemNameStyle = { margin: 0, fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
-      const fileItemMetaStyle = { margin: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, inherit)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left', fontFamily: 'ui-monospace, monospace' }
-
-      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-          h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0, flex: 1 }) }, t('uploadedTitle')),
-          h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: refresh }, t('uploadedRefresh')),
-          h(Button, { variant: 'outline', size: 'sm', disabled: busy || !Array.isArray(files) || files.length === 0, onClick: onClear },
-            busy ? t('uploadedClearing') : t('uploadedClear')),
-        ),
-        error ? h('p', { style: errorStyle }, error) : null,
-        files === null
-          ? h('p', { style: mutedStyle }, t('loading'))
-          : files.length === 0
-            ? h('p', { style: mutedStyle }, t('uploadedEmpty'))
-            : h('div', { style: fileListStyle },
-                files.map((file) => h('div', { key: file.id, style: fileItemStyle },
-                  h('span', { style: { fontSize: 14, flexShrink: 0 } }, '\U0001F4C4'),
-                  h('div', { style: fileItemMainStyle },
-                    h('p', { style: fileItemNameStyle, title: file.name },
-                      `${file.name} \u00b7 ${formatBytes(file.size)} \u00b7 ${new Date(file.createdAt).toLocaleString()}`),
-                    h('p', { style: fileItemMetaStyle, title: file.path }, file.path),
-                  ),
-                  h(Button, { variant: 'ghost', size: 'sm', onClick: () => onCopy(file.path, file.id) },
-                    copiedId === file.id ? t('uploadCopied') : t('uploadCopyPath')),
-                  h(Button, {
-                    variant: 'ghost', size: 'sm', disabled: busy,
-                    onClick: () => onDelete(file.id),
-                  }, failedId === file.id ? t('uploadDeleteFailed') : t('uploadDelete')),
-                )),
-              ),
+      return h('div', { style: { display: 'inline-flex' } },
+        h('button', { type: 'button', onClick: onPick, style: btnStyle, disabled: busy, title: t('attachButton'), 'aria-label': t('attachButton') },
+          h('span', { style: { fontSize: 15, lineHeight: 1 } }, '\uD83D\uDCCE')),
+        h('input', {
+          ref: (el) => { inputRef.current = el },
+          type: 'file',
+          multiple: true,
+          style: { display: 'none' },
+          onChange,
+        }),
       )
+    }
+
+    /**
+     * 全窗拖拽遮罩 + 窗口级粘贴（capture 阶段，先于宿主 composer 的 document
+     * bubble listener）。归属规则（对齐参考设计的「一次性判定」）：一次文件拖拽
+     * 进入窗口时判定——有可用的 composer 上下文（store.current()）就由本插件
+     * 全程接管（抑制宿主原生拖拽事件，只显示自己的遮罩；drop 后整批 stash），
+     * 否则完全不干预（原生行为原样保留）。绝不出现「原生遮罩弹出、drop 却被
+     * 吞掉」的悬挂状态。粘贴：含非图片文件时整批接管（图片也落盘）；纯图片
+     * 放行（视觉捕获/原生附件路径）；文本含 📎 引用行时物化重挂并插回剩余文本。
+     */
+    function installDropzone() {
+      const overlay = document.createElement('div')
+      overlay.style.cssText = [
+        'position:fixed', 'inset:0', 'zIndex:99999', 'display:none',
+        'alignItems:center', 'justifyContent:center',
+        'background:var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45))',
+      ].join(';')
+      const card = document.createElement('div')
+      card.style.cssText = [
+        'padding:28px 40px', 'borderRadius:16px', 'textAlign:center',
+        'background:var(--dsw-alias-bg-elevated, #1f1f1f)',
+        'border:1.5px dashed var(--dsw-alias-accent-primary, #4f9eff)',
+        'boxShadow:0 12px 40px rgba(0,0,0,.35)',
+        'fontFamily:system-ui,-apple-system,sans-serif',
+        'color:var(--dsw-alias-label-primary, inherit)',
+      ].join(';')
+      const title = document.createElement('div')
+      title.style.cssText = 'fontSize:15px;fontWeight:600;marginBottom:6px'
+      const sub = document.createElement('div')
+      sub.style.cssText = 'fontSize:12px;color:var(--dsw-alias-label-tertiary, inherit)'
+      card.append(title, sub)
+      overlay.append(card)
+      document.body.appendChild(overlay)
+
+      const hasFiles = (transfer) => transfer !== null && Array.from(transfer.types).indexOf('Files') >= 0
+      let owning = false
+      let depth = 0
+      const show = (visible) => {
+        if (visible) {
+          title.textContent = t('dropTitle')
+          sub.textContent = t('dropSub')
+        }
+        overlay.style.display = visible ? 'flex' : 'none'
+      }
+      const reset = () => { owning = false; depth = 0; show(false) }
+
+      /** 入口通用：整批 stash（图片也落盘 + 缩略图）。 */
+      const intake = (sessionId, files) => {
+        if (!composerUploadStore.getEnabled()) return
+        void stashFilesFor(sessionId, files)
+      }
+
+      const onDragEnter = (e) => {
+        if (!hasFiles(e.dataTransfer)) return
+        if (depth === 0) owning = uploadsStore.current() !== undefined
+        depth += 1
+        if (!owning) return
+        e.stopPropagation()
+        show(true)
+      }
+      const onDragOver = (e) => {
+        if (!owning || !hasFiles(e.dataTransfer)) return
+        e.preventDefault()
+        e.stopPropagation()
+      }
+      const onDragLeave = (e) => {
+        if (depth === 0) return
+        depth = Math.max(0, depth - 1)
+        if (owning) e.stopPropagation()
+        if (depth === 0) reset()
+      }
+      const onDrop = (e) => {
+        const wasOwning = owning
+        const current = uploadsStore.current()
+        reset()
+        if (!wasOwning || !hasFiles(e.dataTransfer)) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (!current) return
+        const files = Array.from(e.dataTransfer?.files ?? [])
+        if (files.length > 0) intake(current.sessionId, files)
+      }
+      const onPaste = (e) => {
+        const current = uploadsStore.current()
+        if (!current) return
+        const files = Array.from(e.clipboardData?.files ?? [])
+        if (files.length > 0) {
+          const hasNonImage = files.some((file) => !(file.type || '').startsWith('image/'))
+          if (!hasNonImage) return // 纯图片：放行（视觉捕获/原生）
+          e.preventDefault()
+          e.stopPropagation()
+          intake(current.sessionId, files)
+          return
+        }
+        // 文本粘贴：含 📎 引用行时物化重挂，剩余文本插回光标处
+        const text = e.clipboardData?.getData('text/plain') ?? ''
+        if (text.indexOf('\u{1F4CE}') < 0 || text.indexOf('.dsh/uploads/') < 0) return
+        e.preventDefault()
+        e.stopPropagation()
+        const target = e.target
+        void restagePastedText(current.sessionId, text).then(({ handled, remaining }) => {
+          const insert = handled ? remaining : text
+          if (insert === '') return
+          if (target instanceof HTMLTextAreaElement) insertIntoTextarea(target, insert)
+        })
+      }
+
+      window.addEventListener('dragenter', onDragEnter, true)
+      window.addEventListener('dragover', onDragOver, true)
+      window.addEventListener('dragleave', onDragLeave, true)
+      window.addEventListener('drop', onDrop, true)
+      window.addEventListener('paste', onPaste, true)
+      return () => {
+        window.removeEventListener('dragenter', onDragEnter, true)
+        window.removeEventListener('dragover', onDragOver, true)
+        window.removeEventListener('dragleave', onDragLeave, true)
+        window.removeEventListener('drop', onDrop, true)
+        window.removeEventListener('paste', onPaste, true)
+        overlay.remove()
+      }
+    }
+
+    /**
+     * 给指定会话整批 stash 文件（供按钮/全窗入口/组件调用）。返回 Promise
+     * （staging 乐观条目 + bump 由内部处理）。onError 可选：单文件失败回调
+     * （组件用它把错误显示到浮层；窗口入口静默——卡片不出现即失败）。
+     */
+    async function stashFilesFor(sessionId, files, onError) {
+      const cwd = uploadsStore.cwd(sessionId)
+      if (!cwd) return
+      for (const file of files) {
+        const stagedKey = uploadsStore.stage(sessionId, file)
+        try {
+          const dataBase64 = await fileToBase64(file)
+          const r = await fetch('/api/dsh-rider-stash', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ cwd, sessionId, name: String(file.name || 'file'), dataBase64 }),
+          })
+          let body = {}
+          try { body = await r.json() } catch { body = {} }
+          uploadsStore.unstage(sessionId, stagedKey)
+          if (!body || body.ok !== true) {
+            if (onError) onError((r.status === 413 ? t('attachTooLarge') + '\uff1a' : t('attachStashFailed') + '\uff1a') + ((body && body.message) || ''))
+            continue
+          }
+          if ((file.type || '').startsWith('image/')) {
+            try { uploadsStore.setPreview(body.file.relPath, URL.createObjectURL(file)) } catch { /* 预览失败不阻断 */ }
+          }
+          uploadsStore.bump(sessionId)
+        } catch (error) {
+          uploadsStore.unstage(sessionId, stagedKey)
+          if (onError) onError(t('attachStashFailed') + '\uff1a' + (error instanceof Error ? error.message : String(error)))
+        }
+      }
+    }
+
+    /**
+     * 粘贴文本里的附件引用行物化：逐行 restage 命中的引用，返回剩余应插入的文本。
+     * 没有引用行时 handled 为 false，调用方不拦截。
+     */
+    async function restagePastedText(sessionId, text) {
+      const lines = text.split('\n')
+      const refs = lines.map((line) => REF_LINE.exec(line.trim())?.[1]).filter((v) => v !== undefined)
+      if (refs.length === 0) return { handled: false, remaining: text }
+      const cwd = uploadsStore.cwd(sessionId)
+      if (!cwd) return { handled: false, remaining: text }
+      let staged = 0
+      for (const relPath of refs) {
+        try {
+          const r = await fetch('/api/dsh-rider-stash/restage', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ cwd, sessionId, relPath }),
+          })
+          const body = await r.json()
+          if (body && body.ok === true) staged += 1
+        } catch { /* 单条失败继续 */ }
+      }
+      if (staged > 0) uploadsStore.bump(sessionId)
+      const remaining = lines
+        .filter((line) => REF_LINE.exec(line.trim()) === null && line.trim().indexOf('（以上是用户刚拖入的附件') < 0)
+        .join('\n')
+        .replace(/^\n+|\n+$/g, '')
+      return { handled: staged > 0, remaining }
     }
 
     function fieldRow(field, label, hint, state, disabled, actions) {
@@ -1364,7 +1524,6 @@ window.__ModuleLoader__.load({
         ['visionProvider', t('visionProvider'), t('visionProviderHint')],
         ['visionModel', t('visionModel'), t('visionModelHint')],
         ['visionPrompt', t('visionPrompt'), t('visionPromptHint')],
-        ['uploadDir', t('uploadDirLabel'), t('uploadDirHint')],
         ['uploadMaxBytes', t('uploadMaxMBLabel'), t('uploadMaxMBHint')],
       ]
       return h(
@@ -1398,10 +1557,8 @@ window.__ModuleLoader__.load({
         h(DeclareImageCard),
         // 对话粘贴捕获开关（写 localStorage；dock 组件读同一 store）
         h(ComposerCaptureToggleCard),
-        // 对话文件上传开关（写 localStorage；dock 组件读同一 store）
+        // 对话文件暂存开关（写 localStorage；dock/全窗入口读同一 store）
         h(ComposerUploadToggleCard),
-        // 已上传文件管理（列表/复制路径/删除/清空）
-        h(UploadedFilesCard),
         // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）
         h(ImageUnderstandCard),
       )
@@ -1418,6 +1575,16 @@ window.__ModuleLoader__.load({
       } catch {
         // 保持默认中文字典回退
       }
+      // 会话工作区解析器：全窗入口/按钮/dock 从客户端会话注册表拿 cwd（stash 落盘位置）。
+      try {
+        const sessions = ctx.sessions
+        uploadsStore.setCwdResolver((sessionId) => {
+          const snapshot = sessions?.list?.getSnapshot?.()
+          return snapshot?.byId?.[sessionId]?.cwd
+        })
+      } catch {
+        // sessions 服务缺失：stash 不可用（stashFiles 报 attachNoCwd）
+      }
       controller = new RiderVisionCardController()
       ctx.slots.inject('settings.section', () =>
         ctx.slots.register({
@@ -1427,9 +1594,9 @@ window.__ModuleLoader__.load({
           label: () => 'dsh-rider',
           inject: () => (controller ? controller.inject() : {}),
         }, RiderVisionPage))
-      // 对话 composer 级粘贴/拖拽图片捕获：dock 挂空组件（渲染靠 portal），复用
-      // 已有的 /api/dsh-rider-vision/understand 路由，图片不走 DSH 对话流（绕开
-      // apiproxy 对纯文本模型的图片准入拦截）。对齐 dsh-ads AdLayer 的 dock+portal 模式。
+      // 对话 composer 级粘贴图片捕获 + 附件卡片：dock 挂空组件（渲染靠 portal）。
+      // 图片不走 DSH 对话流（绕开 apiproxy 对纯文本模型的图片准入拦截）；
+      // 文件卡片真相源为宿主 pending（listStash 轮询），发送消费后自动消失。
       ctx.slots.inject('conversation.input.dock', () =>
         ctx.slots.register({
           name: 'conversation.input.dock',
@@ -1437,10 +1604,21 @@ window.__ModuleLoader__.load({
           order: 60,
           inject: () => ({}),
         }, ComposerVisionDock))
+      // 回形针按钮（文件选择器入口）：conversation.input.left 槽位。
+      ctx.slots.inject('conversation.input.left', () =>
+        ctx.slots.register({
+          name: 'conversation.input.left',
+          id: 'dsh-rider-attach',
+          order: 20,
+          inject: () => ({}),
+        }, AttachButton))
+      // 全窗拖拽遮罩 + 窗口级粘贴（capture 阶段）：归属一次性判定，无 composer
+      // 上下文时完全不干预原生行为。
+      ctx.effect(() => installDropzone(), 'dsh-rider: window dropzone + paste')
     }
 
     exports.name = 'dsh-rider'
-    exports.inject = ['slots', 'locale']
+    exports.inject = ['slots', 'locale', 'sessions']
     exports.apply = apply
     return module.exports
   },

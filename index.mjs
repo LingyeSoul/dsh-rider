@@ -36,22 +36,24 @@
  *   - 图片必须经 ctx.attachments.saveImage 入库（adapter 经 readImage 取字节），
  *     校验通过才构造 {type:'image', attachment} 消息块，走 ctx.llm.stream。
  *
- * 能力四：对话输入框拖拽上传任意文件 —— `/api/dsh-rider-upload`。
+ * 能力四：对话输入框拖拽上传任意文件 —— `/api/dsh-rider-stash`（stash 管线）。
  *   - 背景：DSH 原生 composer 只接受图片附件（png/jpeg/webp/gif，imageLimits
  *     mediaTypes 硬编码），拖入/粘贴非图片文件 → InputBar `intakeImages` →
  *     `createDraftImages` 抛 UnsupportedImageMediaTypeError → toast「不支持的文件
- *     类型」（dsh-client-ui-conversation/lib/client.js:3564/9664）。官方
- *     dsh-attachment 也明示「第一版仅接受 PNG/JPEG/WebP/GIF；通用文件需要单独的
- *     生命周期与提供方契约」——框架层无通用附件通道，插件自建是唯一路径。
- *   - 解法：client half 的 composer dock 在 capture 阶段拦截非图片文件的
- *     paste/drop（先于 InputBar 的 document bubble listener），经本路由把文件
- *     二进制上传到本机上传目录（默认 ~/.dsh-rider/uploads，settings uploadDir
- *     可覆盖），返回**绝对路径**。文件引用以纯文本插入 composer——消息不含附件，
- *     apiproxy 的图片准入拦截不触发；agent 收到路径后用 fs/pwsh 工具直接读文件
- *     内容（dsh-fs-local 的 read 对绝对路径无范围限制，不依赖会话 workspace）。
- *   - 大小上限：settings uploadMaxBytes（MB，数字），默认 50MB；超限 413。
- *   - 生命周期：每文件一个 `<id>.meta.json`（名称/大小/类型/路径/时间），列表
- *     扫描目录、删除按 id/清空，零锁零 index 竞争。
+ *     类型」。社区插件 dsh-attachments（CocoSgt/dsh-attachments）提出了成熟设计：
+ *     文件落盘到会话工作区 `<cwd>/.dsh/uploads/`、按会话暂存（pending）、发送时在
+ *     `agent/pre-step` wave 把附件清单作为 user 消息折进模型请求——草稿零污染、
+ *     进历史可重放、卡片自动消失。本能力**借鉴该设计**（落盘位置、pending 语义、
+ *     pre-step 注入、引用行物化、全窗拖放/回形针入口），但传输层用 dsh-rider 自建
+ *     HTTP 路由（base64 JSON wire，与既有 vision 路由同构），不引入 typert RPC
+ *     与 TS 构建链；图片行为保持 dsh-rider 既有路径（视觉捕获/原生附件），不落入
+ *     stash。路径安全：只写 `<cwd>/.dsh/uploads/`，文件名白名单清洗 + 时间戳前缀
+ *     防撞名；删除/读取/物化路径 resolve 后前缀校验，拒 `..` 与 `\0`。
+ *   - pending 是内存态（重启后未发送卡片消失，文件仍在磁盘）；全局索引
+ *     `$DSH_HOME/attachments-index.json`（时间戳文件名 → 绝对路径，上限 2000 条）
+ *     支持跨项目引用迁移（粘贴历史消息里的 📎 引用行 → 从来源项目复制进当前工作区）。
+ *   - 上限：settings uploadMaxBytes（MB，数字，默认 32——base64 wire 的现实约束），
+ *     超限报错并引导「大文件直接放项目目录后在消息里写路径」。
  *
  * 能力三：前置视觉设置页 HTTP 路由 —— `/api/dsh-rider-vision`。
  *   - 背景：dsh「设置→插件→插件配置」的 settings.plugin.item 卡片只在目标
@@ -81,10 +83,9 @@
  */
 
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, extname, join, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -259,28 +260,94 @@ const VISION_DEFAULT_PROMPT =
 const VISION_TIMEOUT_MS = 120_000
 
 /* =========================================================================
- * 能力四：对话输入框拖拽上传任意文件
+ * 能力四：对话输入框拖拽上传任意文件（stash 管线）
  * ========================================================================= */
 
-const DEFAULT_UPLOAD_DIR = join(homedir(), '.dsh-rider', 'uploads')
-const DEFAULT_UPLOAD_MAX_MB = 50
+/** 工作区内的落盘目录（相对 cwd）。 */
+const UPLOADS_DIR = '.dsh/uploads'
 const UPLOAD_FILE_NAME_MAX = 120
-const UPLOAD_META_SUFFIX = '.meta.json'
+const DEFAULT_UPLOAD_MAX_MB = 32
+const MAX_PENDING_PER_SESSION = 30
+const MAX_INDEX_ENTRIES = 2000
+const PREVIEW_MAX_BYTES = 20 * 1024 * 1024
 
-/** 文件名清洗：剥路径（basename 同时处理 / 与 \）、去 Windows 非法字符与控制字符、截断。 */
-function sanitizeFileName(name) {
-  const cleaned = basename(String(name ?? ''))
-    .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, UPLOAD_FILE_NAME_MAX)
-  return cleaned === '' || cleaned === '.' || cleaned === '..' ? 'file' : cleaned
+/** 每个会话当前暂存（尚未注入）的附件：sessionId → [{relPath, name, size}]。 */
+const pending = new Map()
+
+/** 全局附件索引路径：$DSH_HOME/attachments-index.json（时间戳文件名 → 绝对路径）。 */
+function indexPath() {
+  const home = process.env.DSH_HOME?.trim()
+  const root = home ? resolve(home) : join(homedir(), '.dsh')
+  return join(root, 'attachments-index.json')
 }
 
-/** 上传目录：settings.uploadDir 覆盖默认 ~/.dsh-rider/uploads（绝对化）。 */
-function resolveUploadDir(visionSettings) {
-  const configured = String(visionSettings.get()?.uploadDir ?? '').trim()
-  return configured === '' ? DEFAULT_UPLOAD_DIR : resolve(configured)
+async function loadIndex() {
+  try {
+    const raw = await readFile(indexPath(), 'utf8')
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 索引只增不删（文件删除时查找侧自然失败）；超上限丢最旧。写失败不阻塞落盘。 */
+async function recordIndex(fileName, absolute) {
+  try {
+    const index = await loadIndex()
+    index[fileName] = absolute
+    const keys = Object.keys(index)
+    const trimmed = keys.length > MAX_INDEX_ENTRIES
+      ? Object.fromEntries(keys.slice(keys.length - MAX_INDEX_ENTRIES).map((k) => [k, index[k]]))
+      : index
+    await writeFile(indexPath(), JSON.stringify(trimmed, null, 2) + '\n', 'utf8')
+  } catch {
+    // 索引写失败不阻断：跨项目迁移退化为不可用
+  }
+}
+
+/** 文件名清洗：白名单保留字母数字/Unicode 文字/点/连字符/下划线，去路径分隔与前导点。 */
+function sanitizeStashName(name) {
+  const base = String(name ?? '').split(/[\\/]/).pop() ?? ''
+  const cleaned = base.replace(/[^\p{L}\p{N}._-]/gu, '_').replace(/^\.+/, '')
+  return cleaned === '' ? 'file' : cleaned.slice(0, UPLOAD_FILE_NAME_MAX)
+}
+
+/** 时间戳前缀（yyMMdd-HHmmss），防撞名。 */
+function stampPrefix() {
+  const now = new Date()
+  const pad = (v) => String(v).padStart(2, '0')
+  return `${pad(now.getFullYear() % 100)}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+}
+
+/** 人类可读大小。 */
+function formatStashSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 校验 cwd：必须是非空绝对路径、存在的目录。 */
+function checkWorkspace(cwd) {
+  if (typeof cwd !== 'string' || cwd === '' || cwd.includes('\0')) throw new Error('cwd 必须是非空字符串')
+  if (!isAbsolute(cwd)) throw new Error('cwd 必须是绝对路径')
+  return resolve(cwd)
+}
+
+/** 校验会话 id 与 uploads 相对路径（前缀 + 拒绝 .. 与 \0）。 */
+function checkUploadsRelPath(relPath) {
+  if (typeof relPath !== 'string' || !relPath.startsWith(`${UPLOADS_DIR}/`) || relPath.includes('..') || relPath.includes('\0')) {
+    throw new Error(`不支持的 uploads 路径：${JSON.stringify(relPath)}`)
+  }
+  return relPath
+}
+
+/** 解析后的绝对路径必须仍在 uploads 目录内（前缀校验，防穿越）。 */
+function resolveUploadsTarget(cwd, relPath) {
+  const target = resolve(cwd, relPath)
+  const root = resolve(cwd, UPLOADS_DIR) + (process.platform === 'win32' ? '\\' : '/')
+  if (!target.startsWith(root) && target !== resolve(cwd, UPLOADS_DIR)) throw new Error('路径越出了 uploads 目录')
+  return target
 }
 
 /** 上传大小上限：settings.uploadMaxBytes（MB，数字；0/缺省回默认）。 */
@@ -289,35 +356,31 @@ function resolveUploadMaxBytes(visionSettings) {
   return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : DEFAULT_UPLOAD_MAX_MB * 1024 * 1024
 }
 
-/** 读取请求二进制 body；超过 limit 立即拒绝（RIDER_UPLOAD_TOO_LARGE）并暂停读取。 */
-function readBinaryBody(req, limit) {
-  return new Promise((resolveBody, reject) => {
-    const chunks = []
-    let total = 0
-    let settled = false
-    const fail = (error) => {
-      if (settled) return
-      settled = true
-      reject(error)
-    }
-    req?.on?.('data', (chunk) => {
-      if (settled) return
-      const size = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk))
-      total += size
-      if (total > limit) {
-        req.pause?.()
-        fail(Object.assign(new Error(`文件大小 ${total} 字节超过上限 ${limit} 字节`), { code: 'RIDER_UPLOAD_TOO_LARGE' }))
-        return
-      }
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
-    })
-    req?.on?.('end', () => {
-      if (settled) return
-      settled = true
-      resolveBody(Buffer.concat(chunks))
-    })
-    req?.on?.('error', (error) => fail(error))
+/** 注入消息正文：附件清单 + 读取指引（协议文本，不本地化）。 */
+function buildAttachmentNote(files) {
+  const lines = files.map((file) => `📎 ${file.name}（${formatStashSize(file.size)}）→ ${file.relPath}`)
+  return `${lines.join('\n')}\n（以上是用户刚拖入的附件，已保存在会话工作区；需要时用文件工具按相对路径读取）`
+}
+
+/**
+ * 把某会话的暂存附件折进一次 pre-step 决策（纯函数，导出供门禁直测）。
+ * 仅在「决策为 enter 且本步有已认领的用户消息」时注入；注入位置紧跟首条
+ * 已认领消息之前（历史里附件清单显示在用户文本上方，模型侧先见附件后见问题）。
+ * @returns {decision, consumed} —— consumed 表示暂存已被消费（调用方删除 pending）。
+ */
+export function foldPendingAttachments(decision, payload, files) {
+  if (decision?.kind !== 'enter' || !Array.isArray(decision.messages)) return { decision, consumed: false }
+  const claimed = payload?.messages
+  if (!Array.isArray(claimed) || claimed.length === 0) return { decision, consumed: false }
+  if (!Array.isArray(files) || files.length === 0) return { decision, consumed: false }
+  const note = createUserMessage({
+    content: [{ type: 'text', text: buildAttachmentNote(files) }],
+    source: { kind: 'user' },
   })
+  const firstClaimed = decision.messages.findIndex((message) => claimed.includes(message))
+  const at = Math.max(firstClaimed, 0)
+  const messages = [...decision.messages.slice(0, at), note, ...decision.messages.slice(at)]
+  return { decision: { ...decision, kind: 'enter', messages }, consumed: true }
 }
 
 /** 归一化图片 media type：声明值（可带参数）与扩展名互相兜底，别名收敛到标准名。 */
@@ -481,7 +544,6 @@ const VISION_SETTINGS_SCHEMA = z.object({
   visionProvider: z.string(),
   visionModel: z.string(),
   visionPrompt: z.string(),
-  uploadDir: z.string(),
   uploadMaxBytes: z.number(),
 })
 
@@ -660,14 +722,13 @@ export function apply(ctx) {
           }
           const method = req?.method
           try {
-            /** resolved 快照：三个视觉字段 + 两个上传配置（uploadMaxBytes 0 = 默认）。 */
+            /** resolved 快照：三个视觉字段 + 上传大小上限（uploadMaxBytes 0 = 默认）。 */
             const snapshot = () => {
               const stored = visionSettings.get() ?? {}
               return {
                 visionProvider: typeof stored.visionProvider === 'string' ? stored.visionProvider : '',
                 visionModel: typeof stored.visionModel === 'string' ? stored.visionModel : '',
                 visionPrompt: typeof stored.visionPrompt === 'string' ? stored.visionPrompt : '',
-                uploadDir: typeof stored.uploadDir === 'string' ? stored.uploadDir : '',
                 uploadMaxBytes: Number(stored.uploadMaxBytes) > 0 ? Number(stored.uploadMaxBytes) : 0,
               }
             }
@@ -685,7 +746,7 @@ export function apply(ctx) {
               await visionSettings.replace({})
             } else {
               const patch = {}
-              for (const field of ['visionProvider', 'visionModel', 'visionPrompt', 'uploadDir', 'uploadMaxBytes']) {
+              for (const field of ['visionProvider', 'visionModel', 'visionPrompt', 'uploadMaxBytes']) {
                 if (Object.prototype.hasOwnProperty.call(body.update ?? {}, field)) {
                   const value = body.update[field]
                   if (field === 'uploadMaxBytes') {
@@ -871,16 +932,17 @@ export function apply(ctx) {
           }
         },
       })
-      /* 文件上传路由：'/api/dsh-rider-upload'。
-       * client half 的 composer dock 把非图片文件（拖拽/粘贴）二进制 POST 到这里，
-       * handler 写入上传目录（默认 ~/.dsh-rider/uploads，settings uploadDir 覆盖）并
-       * 返回绝对路径——agent 收到路径后用 fs/pwsh 工具直接读文件内容，消息本身是
-       * 纯文本，绕开 DSH 对话流的图片准入拦截。GET 列表 / DELETE 单删或清空
-       * （每文件一个 <id>.meta.json，扫描目录零锁）。大小上限
-       * settings uploadMaxBytes（MB），超限 413。 */
-      const stopUpload = ctx.webServer.register({
+      /* 文件暂存路由组：'/api/dsh-rider-stash'（POST 落盘 / GET 列表 / DELETE 撤回或清空）、
+       * '/api/dsh-rider-stash/restage'（引用行物化，跨项目迁移）、
+       * '/api/dsh-rider-stash/read'（预览读回）。
+       * 设计借鉴 dsh-attachments（CocoSgt/dsh-attachments）：文件落盘到会话工作区
+       * `<cwd>/.dsh/uploads/` 并按会话暂存（pending），发送时经 agent/pre-step 把
+       * 附件清单作为 user 消息注入模型请求（草稿零污染）；传输层为 base64 JSON wire
+       * （与既有 vision 路由同构）。路径安全：只写 uploads 目录内、文件名白名单清洗 +
+       * 时间戳前缀防撞名、relPath resolve 后前缀校验。 */
+      const stopStash = ctx.webServer.register({
         kind: 'exact',
-        path: '/api/dsh-rider-upload',
+        path: '/api/dsh-rider-stash',
         handler: async (req, res) => {
           const send = (status, body) => {
             res.statusCode = status
@@ -888,99 +950,201 @@ export function apply(ctx) {
             res.end(JSON.stringify(body))
           }
           try {
-            const dir = resolveUploadDir(visionSettings)
             const maxBytes = resolveUploadMaxBytes(visionSettings)
             const method = req?.method
             if (method === 'GET') {
-              await mkdir(dir, { recursive: true })
-              const files = []
-              for (const name of await readdir(dir)) {
-                if (!name.endsWith(UPLOAD_META_SUFFIX)) continue
-                try {
-                  const meta = JSON.parse(await readFile(join(dir, name), 'utf8'))
-                  if (meta && typeof meta.id === 'string' && typeof meta.path === 'string') files.push(meta)
-                } catch {
-                  // 损坏的 meta 跳过（不阻断列表）
-                }
-              }
-              files.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
-              send(200, { ok: true, files })
+              const sessionId = typeof req?.url === 'string' ? new URL(req.url, 'http://x').searchParams.get('sessionId') ?? '' : ''
+              send(200, { ok: true, files: typeof sessionId === 'string' && sessionId !== '' ? (pending.get(sessionId) ?? []) : [] })
               return
             }
-            if (method === 'DELETE') {
-              await mkdir(dir, { recursive: true })
-              const body = await readJsonBody(req)
-              if (body.clear === true) {
-                for (const name of await readdir(dir)) {
-                  await rm(join(dir, name), { force: true })
-                }
-                send(200, { ok: true, cleared: true, removed: [] })
-                return
-              }
-              const ids = Array.isArray(body.ids)
-                ? body.ids.map(String)
-                : (typeof body.id === 'string' ? [body.id] : [])
-              const removed = []
-              for (const id of ids) {
-                const metaPath = join(dir, `${id}${UPLOAD_META_SUFFIX}`)
-                try {
-                  const meta = JSON.parse(await readFile(metaPath, 'utf8'))
-                  await rm(join(dir, String(meta.storageName ?? id)), { force: true })
-                  await rm(metaPath, { force: true })
-                  removed.push(id)
-                } catch {
-                  // 不存在/已删：跳过
-                }
-              }
-              send(200, { ok: true, removed })
-              return
-            }
-            if (method !== 'POST') {
+            if (method !== 'POST' && method !== 'DELETE') {
               send(405, { ok: false, message: 'method not allowed' })
               return
             }
-            const data = await readBinaryBody(req, maxBytes)
-            if (data.length === 0) {
-              send(400, { ok: false, message: '请求体为空（未收到文件数据）' })
+            const body = await readJsonBody(req)
+            const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+            if (sessionId === '' || sessionId.length > 200) {
+              send(400, { ok: false, message: 'sessionId 不能为空' })
               return
             }
-            let rawName = ''
-            try {
-              rawName = decodeURIComponent(String(req.headers?.['x-file-name'] ?? ''))
-            } catch {
-              rawName = ''
+            if (method === 'DELETE') {
+              const cwd = typeof body.cwd === 'string' ? checkWorkspace(body.cwd) : ''
+              if (cwd === '') { send(400, { ok: false, message: 'cwd 不能为空' }); return }
+              let stats
+              try { stats = await stat(cwd) } catch { send(400, { ok: false, message: `工作区目录不可访问：${cwd}` }); return }
+              if (!stats.isDirectory()) { send(400, { ok: false, message: `cwd 不是目录：${cwd}` }); return }
+              const staged = pending.get(sessionId) ?? []
+              if (body.clear === true) {
+                for (const file of staged) {
+                  try { await rm(resolveUploadsTarget(cwd, file.relPath), { force: true }) } catch { /* 删除失败不阻塞清空 */ }
+                }
+                pending.delete(sessionId)
+                send(200, { ok: true, cleared: true })
+                return
+              }
+              const relPath = checkUploadsRelPath(body.relPath)
+              const target = resolveUploadsTarget(cwd, relPath)
+              const next = staged.filter((file) => file.relPath !== relPath)
+              if (next.length === 0) pending.delete(sessionId)
+              else pending.set(sessionId, next)
+              let existed = true
+              try { await stat(target) } catch { existed = false }
+              if (existed) await rm(target, { force: true })
+              send(200, { ok: true, removed: existed })
+              return
             }
-            const name = sanitizeFileName(rawName)
-            const mediaType = String(req.headers?.['x-file-type'] ?? 'application/octet-stream')
-              .split(';')[0].trim() || 'application/octet-stream'
-            const id = randomUUID()
-            const storageName = `${id}${extname(name)}`
+            const cwd = typeof body.cwd === 'string' ? checkWorkspace(body.cwd) : ''
+            if (cwd === '') { send(400, { ok: false, message: 'cwd 不能为空' }); return }
+            let stats
+            try { stats = await stat(cwd) } catch { send(400, { ok: false, message: `工作区目录不可访问：${cwd}` }); return }
+            if (!stats.isDirectory()) { send(400, { ok: false, message: `cwd 不是目录：${cwd}` }); return }
+            if (typeof body.dataBase64 !== 'string') {
+              send(400, { ok: false, message: 'dataBase64 必须是字符串' })
+              return
+            }
+            const bytes = Buffer.from(body.dataBase64, 'base64')
+            if (bytes.length === 0) {
+              send(400, { ok: false, message: '文件内容为空' })
+              return
+            }
+            if (bytes.length > maxBytes) {
+              send(413, { ok: false, message: `文件 ${bytes.length} 字节超过上限 ${maxBytes} 字节（${Math.floor(maxBytes / 1024 / 1024)}MB）；更大的文件请直接放进项目目录后在消息里写路径` })
+              return
+            }
+            const staged = pending.get(sessionId) ?? []
+            if (staged.length >= MAX_PENDING_PER_SESSION) {
+              send(413, { ok: false, message: `一条消息最多暂存 ${MAX_PENDING_PER_SESSION} 个附件` })
+              return
+            }
+            const name = sanitizeStashName(body.name)
+            const dir = join(cwd, UPLOADS_DIR)
             await mkdir(dir, { recursive: true })
-            await writeFile(join(dir, storageName), data)
-            const file = {
-              id,
-              name,
-              size: data.length,
-              mediaType,
-              path: join(dir, storageName),
-              createdAt: Date.now(),
-              storageName,
+            let fileName = `${stampPrefix()}-${name}`
+            let target = join(dir, fileName)
+            try {
+              await stat(target)
+              fileName = `${stampPrefix()}-${String(Date.now() % 1000)}-${name}`
+              target = join(dir, fileName)
+            } catch {
+              // 未占用：用首个文件名
             }
-            await writeFile(join(dir, `${id}${UPLOAD_META_SUFFIX}`), JSON.stringify(file))
-            const { storageName: _internal, ...publicFile } = file
-            send(200, { ok: true, file: publicFile })
+            await writeFile(target, bytes)
+            await recordIndex(fileName, target)
+            const file = { relPath: `${UPLOADS_DIR}/${fileName}`, name, size: bytes.length }
+            pending.set(sessionId, [...staged, file])
+            send(200, { ok: true, file })
           } catch (error) {
-            if (error?.code === 'RIDER_UPLOAD_TOO_LARGE') {
-              send(413, { ok: false, message: error.message })
-              return
-            }
             send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
           }
         },
       })
-      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.(); stopUpload?.() }
-    }, 'dsh-rider: vision settings + understand + declare routes')
+      const stopRestage = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-stash/restage',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          try {
+            if (req?.method !== 'POST') { send(405, { ok: false, message: 'method not allowed' }); return }
+            const body = await readJsonBody(req)
+            const sessionId = typeof body.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : ''
+            if (sessionId === '') { send(400, { ok: false, message: 'sessionId 不能为空' }); return }
+            const cwd = typeof body.cwd === 'string' ? checkWorkspace(body.cwd) : ''
+            if (cwd === '') { send(400, { ok: false, message: 'cwd 不能为空' }); return }
+            const relPath = checkUploadsRelPath(body.relPath)
+            let target = resolveUploadsTarget(cwd, relPath)
+            let size
+            try {
+              const stats = await stat(target)
+              size = stats.size
+            } catch {
+              // 本地没有：查全局索引，从来源项目迁移复制进当前工作区（跨项目引用）
+              const fileName = relPath.slice(UPLOADS_DIR.length + 1)
+              const source = (await loadIndex())[fileName]
+              if (typeof source !== 'string') {
+                send(404, { ok: false, message: `引用的文件不存在（本地与全局索引均未命中）：${relPath}` })
+                return
+              }
+              let sourceStats
+              try { sourceStats = await stat(source) } catch { sourceStats = undefined }
+              if (sourceStats === undefined || !sourceStats.isFile()) {
+                send(404, { ok: false, message: `引用的来源文件不可访问：${source}` })
+                return
+              }
+              const dir = join(cwd, UPLOADS_DIR)
+              await mkdir(dir, { recursive: true })
+              await copyFile(source, target)
+              await recordIndex(fileName, target)
+              size = sourceStats.size
+            }
+            const staged = pending.get(sessionId) ?? []
+            if (!staged.some((file) => file.relPath === relPath)) {
+              if (staged.length >= MAX_PENDING_PER_SESSION) {
+                send(413, { ok: false, message: `一条消息最多暂存 ${MAX_PENDING_PER_SESSION} 个附件` })
+                return
+              }
+              const base = relPath.slice(UPLOADS_DIR.length + 1)
+              const name = base.replace(/^\d{6}-\d{6}(?:-\d+)?-/u, '')
+              pending.set(sessionId, [...staged, { relPath, name, size }])
+            }
+            send(200, { ok: true, file: { relPath, size } })
+          } catch (error) {
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
+      const stopStashRead = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-stash/read',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          try {
+            if (req?.method !== 'GET') { send(405, { ok: false, message: 'method not allowed' }); return }
+            const url = new URL(req?.url ?? '/', 'http://x')
+            const cwd = typeof url.searchParams.get('cwd') === 'string' ? checkWorkspace(url.searchParams.get('cwd')) : ''
+            if (cwd === '') { send(400, { ok: false, message: 'cwd 不能为空' }); return }
+            const relPath = checkUploadsRelPath(url.searchParams.get('relPath') ?? '')
+            const target = resolveUploadsTarget(cwd, relPath)
+            let stats
+            try { stats = await stat(target) } catch { send(404, { ok: false, message: `文件不存在：${relPath}` }); return }
+            if (stats.size > PREVIEW_MAX_BYTES) {
+              send(413, { ok: false, message: `文件超过 ${PREVIEW_MAX_BYTES / 1024 / 1024}MB 预览上限，请用系统应用打开` })
+              return
+            }
+            const data = await readFile(target)
+            send(200, { ok: true, dataBase64: data.toString('base64'), size: stats.size })
+          } catch (error) {
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
+      /* 发送时注入：agent/pre-step wave —— 若该会话有暂存附件且本步有已认领的
+       * 用户消息，把附件清单作为一条 user 消息折进决策（紧跟首条已认领消息之前），
+       * 然后消费暂存（卡片自动消失）。委托 next() 产出下游决策后再折入（与官方
+       * dsh-agent-instructions 的注入模式同构）。注册在 webServer effect 之外：
+       * 注入不依赖 webServer，极端组合下仍可用。 */
+      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.(); stopStash?.(); stopRestage?.(); stopStashRead?.() }
+    }, 'dsh-rider: vision settings + understand + declare + stash routes')
   }
+
+  /* agent/pre-step 注入（不依赖 webServer；pending 为模块级，与 stash 路由共享）。 */
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const decision = await next()
+    const sessionId = payload?.agent?.session?.id
+    if (typeof sessionId !== 'string') return decision
+    const files = pending.get(sessionId)
+    if (files === undefined || files.length === 0) return decision
+    const folded = foldPendingAttachments(decision, payload, files)
+    if (folded.consumed) pending.delete(sessionId)
+    return folded.decision
+  })
 }
 
 /** 读取请求 JSON body（POST），容错非 JSON / 读流出错。 */

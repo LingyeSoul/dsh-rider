@@ -3,8 +3,8 @@
 <p align="center">
   DSH 官方 bundle 插件：免费网络搜索工具 <code>duckduckgo_search</code>（零 API key）
   + 前置视觉理解工具 <code>vision_understand</code>（会话模型不支持图片时，用 dsh 配置的
-  支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 对话输入框拖拽上传任意文件
-  （非图片文件上传到本机，绝对路径插入消息，agent 用 fs/pwsh 工具读取）
+  支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 对话窗口拖拽上传任意文件
+  （文件暂存进会话工作区，附件清单随消息自动注入，草稿零污染）
   + 视觉模型图片模态声明（pi-ai 手写 provider 的 <code>input:[text,image]</code> 补丁，
   dsh 面板不暴露该字段）。
   DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
@@ -125,25 +125,34 @@ DSH 对纯文本会话模型的图片准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAG
 
 > 技术细节见决策记录 `decisions/implemented/2026-08-15-composer-paste-vision-dock.md`。
 
-# 对话输入框拖拽上传文件（任意类型）
+# 对话输入框拖拽上传文件（任意类型，stash 管线）
 
 DSH 原生 composer 只接受图片附件——拖入/粘贴非图片文件会被原生 InputBar 拒绝并提示
 「不支持的文件类型」（官方 `dsh-client-ui-attachment` 也明示「仅支持图片」）。dsh-rider
-在对话输入框补上**任意文件上传**：
+借鉴社区插件 [dsh-attachments](https://github.com/CocoSgt/dsh-attachments) 的成熟设计
+（自研实现，不抄代码）补上**任意文件暂存**：
 
-- 在 composer 里**拖入**（或从资源管理器**复制后 Ctrl+V 粘贴**）任意非图片文件 →
-  dsh-rider 把文件上传到本机上传目录（默认 `~/.dsh-rider/uploads`，设置页可改）→
-  输入框上方浮层显示文件卡片（名称/大小/状态）。
-- 点「**插入路径**」把文件的**绝对路径**写进消息（或「复制路径」自行粘贴）→ 发送 →
-  agent 用自己的 fs/pwsh 工具读取文件内容。消息本身是纯文本，不触发 DSH 对话流的
-  附件准入拦截（`MODEL_DOES_NOT_SUPPORT_IMAGES` 只拦图片块）——纯文本会话模型同样适用。
-- 多文件拖入逐个上传；可单删/全部清除（设置页「已上传文件」卡片也有列表管理）。
-- 图片不受影响：仍走「对话粘贴捕获」（视觉理解）或原生图片附件路径。
-- 大小上限默认 50MB/文件（设置页 `uploadMaxBytes` 可调）；文件名自动清洗（剥路径、
-  去 Windows 保留字符），存储名随机化，防路径穿越。
-- 默认开；可在 **设置 → dsh-rider** 页关闭「在对话输入框捕获拖拽/粘贴的文件并上传」。
+- **入口三件套**：① 输入框工具栏的**回形针按钮**（文件选择器，multi-select 无类型过滤）；
+  ② **全窗口拖拽**（拖到页面任意位置出现释放遮罩；有 composer 上下文才接管，否则
+  原生行为原样保留）；③ **粘贴**（从资源管理器复制的文件；文本里含 `📎 … → .dsh/uploads/…`
+  引用行会自动重新物化成卡片）。
+- 文件落盘到**会话工作区** `<cwd>/.dsh/uploads/`（按会话隔离，agent 相对路径即可读），
+  输入框上方浮层显示**附件卡片**（扩展名图标/名称/大小/移除；图片带本地缩略图）。
+- **草稿零污染**：不在输入框写任何引用文本。发送下一条消息时，dsh-rider 在
+  `agent/pre-step` wave 把附件清单作为一条 user 消息注入模型请求（紧跟用户消息之前，
+  与官方 dsh-agent-instructions 同构）——进会话历史、可重放，卡片自动消失；agent 用
+  fs/pwsh 工具按相对路径读取文件内容。纯文本会话模型同样适用（不触发图片准入拦截）。
+- 卡片可**移除**（删除落盘文件）、**复制引用**（wire 格式，粘回 composer 重新物化）、
+  **全部清除**。已发送消息引用的文件保留在磁盘（历史仍指向它们）；未发送的暂存是
+  内存态，重启 web 后卡片消失、文件仍在。
+- 粘贴图片仍走「对话捕获」（视觉理解/原生附件）；**拖入与按钮选择的图片同样暂存成卡片**
+  （模型需要看时用视觉工具按路径读）。跨项目引用支持：从历史消息复制的引用行会经
+  全局索引把文件从来源项目迁移进当前工作区。
+- 大小上限默认 32MB/文件（base64 wire 的现实约束，设置页 `uploadMaxBytes` 可调）；
+  文件名白名单清洗 + 时间戳前缀防撞名，路径 resolve 后前缀校验防穿越。
+- 默认开；可在 **设置 → dsh-rider** 页关闭「在对话窗口捕获拖拽/粘贴的文件并暂存」。
 
-> 技术细节见决策记录 `decisions/implemented/2026-08-16-composer-file-upload.md`。
+> 技术细节见决策记录 `decisions/implemented/2026-08-16-composer-file-stash.md`。
 
 ## 为视觉模型补图片模态声明（pi-ai 手写 provider）
 
@@ -167,10 +176,10 @@ dsh web 生效**（pi-ai 路由是注册级事实）。
 
 ## 设置界面配置（推荐）
 
-装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：五个字段（视觉提供商 /
-视觉模型 / 默认指令 / 上传目录 / 单文件大小上限（MB），保存即写入 `dsh-rider`
-settings 命名空间，live 生效无需重启） + 五张卡片（「为视觉模型补图片模态声明」
-「对话粘贴捕获开关」「对话文件上传开关」「已上传文件」「图片理解」）。等效于
+装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：四个字段（视觉提供商 /
+视觉模型 / 默认指令 / 单文件暂存上限（MB），保存即写入 `dsh-rider`
+settings 命名空间，live 生效无需重启） + 四张卡片（「为视觉模型补图片模态声明」
+「对话粘贴捕获开关」「对话文件暂存开关」「图片理解」）。等效于
 手改 `settings.yaml`：
 
 ```yaml
@@ -178,8 +187,7 @@ dsh-rider:
   visionProvider: siliconflow
   visionModel: zai-org/GLM-5.2
   visionPrompt: 请详细描述这张图片的内容
-  uploadDir: ~/.dsh-rider/uploads   # 上传目录（留空用默认）
-  uploadMaxBytes: 50                # 单文件上限（MB，0 = 默认 50）
+  uploadMaxBytes: 32                # 单文件暂存上限（MB，0 = 默认 32）
 ```
 
 > **为什么是独立设置页而非「设置→插件→插件配置」卡片**：dsh rc.6 的「插件
@@ -284,17 +292,22 @@ dsh plugin --profile web add .
 
 - 结构：`cordis.patch.yml` = bundle 组合层（自挂载）；`index.mjs` = Node half
   （`duckduckgo_search` + `vision_understand` 工具 + 系统提示指引 + `dsh-rider`
-  settings 命名空间 + 四条自建 HTTP 路由：`/api/dsh-rider-vision` 配置读写、
+  settings 命名空间 + 六条自建 HTTP 路由：`/api/dsh-rider-vision` 配置读写、
   `/api/dsh-rider-vision/understand` 图片理解、`/api/dsh-rider-vision/declare`
-  图片模态声明、`/api/dsh-rider-upload` 文件上传/列表/删除）；`client/index.js` =
-  client half（`settings.section` 独立设置页含五张卡片 + `conversation.input.dock`
-  对话粘贴图片捕获与文件上传，CJS 源码即产物，零构建链）；
+  图片模态声明、`/api/dsh-rider-stash` 文件暂存（落盘/列表/撤回/清空）、
+  `/api/dsh-rider-stash/restage` 引用行物化、`/api/dsh-rider-stash/read` 预览
+  读回 + `agent/pre-step` 注入）；`client/index.js` =
+  client half（`settings.section` 独立设置页含四张卡片 + `conversation.input.dock`
+  粘贴图片捕获与附件卡片 + `conversation.input.left` 回形针按钮 + 全窗拖放遮罩，
+  CJS 源码即产物，零构建链）；
   搜索实现依赖 `ddg-kit@0.1.1`（声明在 dependencies，随包安装进 profile 闘包）；
   视觉能力全部走官方服务（`ctx.llm` / `ctx.attachments` / `ctx.settings` /
   `ctx.agentDefaultModel` / `ctx.webServer`，零新增依赖）。
 - 门禁：`node scripts/gates/run.mjs`（机械检查 + 自证测试；entry 门禁用依赖
   stub 做真实 import 与 apply() 注册形状校验；`vision-execute` 门禁用全服务
-  fake ctx 跑工具 execute 的成功/失败路径冒烟；`client-bundle`/`client-execute`
-  门禁用 vm 沙箱执行真实 client bundle（含 fetch stub）并冒烟设置页的表单流
-  （编辑→保存→重置→清除→丢弃），均无需 node_modules）。
+  fake ctx 跑工具 execute 的成功/失败路径冒烟；`stash-execute` 门禁在临时
+  工作区跑暂存路由全路径（落盘/列表/撤回/清空/restage 迁移/超限/穿越）+ 
+  pre-step 注入纯函数直测；`client-bundle`/`client-execute`
+  门禁用 vm 沙箱执行真实 client bundle（含 fetch stub 与 document stub）并冒烟
+  设置页的表单流（编辑→保存→重置→清除→丢弃），均无需 node_modules）。
 - 决策记录：`decisions/implemented/`。
