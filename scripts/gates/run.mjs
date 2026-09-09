@@ -250,8 +250,6 @@ const DSH_TOOLS_STUB_PKG = '{"name":"@deepseek-ai/dsh-tools","version":"0.0.0-st
 const DSH_TOOLS_STUB_JS = "export function defineTool(options) { return options; }\n";
 const DSH_LLM_STUB_PKG = '{"name":"@deepseek-ai/dsh-llm","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const DSH_LLM_STUB_JS = "export function createUserMessage(input) { return { id: 'msg-stub', ...input }; }\n";
-const DSH_SETTINGS_STUB_PKG = '{"name":"@deepseek-ai/dsh-settings","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
-const DSH_SETTINGS_STUB_JS = "export function settingsNamespace(value) { return value; }\n";
 const SCHEMASTERY_STUB_PKG = '{"name":"@deepseek-ai/schemastery","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nconst number = () => ({ __type: 'number' });\nexport default { object: (shape) => ({ __shape: shape }), string, number };\n";
 
@@ -269,7 +267,6 @@ function ensureEntryStubs() {
   writeStub("ddg-kit", DDG_KIT_STUB_PKG, DDG_KIT_STUB_JS);
   writeStub("@deepseek-ai/dsh-tools", DSH_TOOLS_STUB_PKG, DSH_TOOLS_STUB_JS);
   writeStub("@deepseek-ai/dsh-llm", DSH_LLM_STUB_PKG, DSH_LLM_STUB_JS);
-  writeStub("@deepseek-ai/dsh-settings", DSH_SETTINGS_STUB_PKG, DSH_SETTINGS_STUB_JS);
   writeStub("@deepseek-ai/schemastery", SCHEMASTERY_STUB_PKG, SCHEMASTERY_STUB_JS);
   return created;
 }

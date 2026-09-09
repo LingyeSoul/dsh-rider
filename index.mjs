@@ -89,7 +89,6 @@ import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { DdgError, SafeSearchType, createDdgClient } from 'ddg-kit'
 
@@ -539,7 +538,7 @@ async function runVisionCall(ctx, { provider, model, image, prompt, signal }) {
 }
 
 /** dsh-rider settings 命名空间：前置视觉理解的默认模型选择 + 文件上传配置（均为可选）。 */
-const VISION_SETTINGS_NS = settingsNamespace('dsh-rider')
+const VISION_SETTINGS_NS = 'dsh-rider'
 const VISION_SETTINGS_SCHEMA = z.object({
   visionProvider: z.string(),
   visionModel: z.string(),
