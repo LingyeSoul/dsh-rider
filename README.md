@@ -6,7 +6,7 @@
   支持视觉的模型理解图片）+ 对话输入框粘贴图片捕获 + 对话窗口拖拽上传任意文件
   （文件暂存进会话工作区，附件清单随消息自动注入，草稿零污染）
   + 视觉模型图片模态声明（pi-ai 手写 provider 的 <code>input:[text,image]</code> 补丁，
-  dsh 面板不暴露该字段）。
+  dsh 面板不暴露该字段）+ Token 验证开关（关闭后免 token 直接访问，立即生效）。
   DuckDuckGo（ddg-kit）优先，自动读取 Windows 系统代理；DuckDuckGo 不可达/限流时
   自动回退 Bing。并注入系统提示指引让 agent 优先使用它（内置 deepseek 网页搜索仅作最终后备）。
 </p>
@@ -175,12 +175,25 @@ dsh web 生效**（pi-ai 路由是注册级事实）。
 
 > 技术细节见决策记录 `decisions/implemented/2026-08-15-image-modality-declare-route.md`。
 
+## 关闭 token 验证（免 token 访问）
+
+`dsh web` 的浏览器入口默认需要启动打印的 `http://127.0.0.1:3080/?token=…` 链接。
+本机个人使用时每次都要翻找链接——dsh-rider 设置页提供「关闭 token 验证」开关：
+开启后**任何浏览器直接打开实例地址即可进入**（不再需要 token 链接或登录 Cookie），
+**立即生效、无需重启**；关闭即时恢复验证。
+
+> ⚠️ 这会同时开放全部 API（会话、工具、模型调用）——任何能访问该地址的设备都
+> 完全可控本实例，请仅在个人电脑或可信网络中开启。开关随设置持久，重启 dsh web
+> 后仍保持。
+
+> 技术细节见决策记录 `decisions/implemented/2026-09-09-disable-token-auth-toggle.md`。
+
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：四个字段（视觉提供商 /
 视觉模型 / 默认指令 / 单文件暂存上限（MB），保存即写入 `dsh-rider`
-settings 命名空间，live 生效无需重启） + 四张卡片（「为视觉模型补图片模态声明」
-「对话粘贴捕获开关」「对话文件暂存开关」「图片理解」）。等效于
+settings 命名空间，live 生效无需重启） + 五张卡片（「为视觉模型补图片模态声明」
+「对话粘贴捕获开关」「对话文件暂存开关」「关闭 token 验证」「图片理解」）。等效于
 手改 `settings.yaml`：
 
 ```yaml
@@ -189,6 +202,7 @@ dsh-rider:
   visionModel: zai-org/GLM-5.2
   visionPrompt: 请详细描述这张图片的内容
   uploadMaxBytes: 32                # 单文件暂存上限（MB，0 = 默认 32）
+  openAccess: false                 # 关闭 token 验证：开启后免 token 访问（仅限可信网络）
 ```
 
 > **为什么是独立设置页而非「设置→插件→插件配置」卡片**：dsh rc.6 的「插件

@@ -251,7 +251,7 @@ const DSH_TOOLS_STUB_JS = "export function defineTool(options) { return options;
 const DSH_LLM_STUB_PKG = '{"name":"@deepseek-ai/dsh-llm","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const DSH_LLM_STUB_JS = "export function createUserMessage(input) { return { id: 'msg-stub', ...input }; }\n";
 const SCHEMASTERY_STUB_PKG = '{"name":"@deepseek-ai/schemastery","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
-const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nconst number = () => ({ __type: 'number' });\nexport default { object: (shape) => ({ __shape: shape }), string, number };\n";
+const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nconst number = () => ({ __type: 'number' });\nconst boolean = () => ({ __type: 'boolean' });\nexport default { object: (shape) => ({ __shape: shape }), string, number, boolean };\n";
 
 /** 仓库无 node_modules 时生成最小 stub（运行后删除）。 */
 function ensureEntryStubs() {
@@ -853,6 +853,162 @@ const stashExecuteGate = gate(
   },
 );
 
+/* -------------------------- open-access 门禁 -------------------------- */
+
+/** fake connection 服务：原版鉴权行为（authorizeIndex=false 拒绝 / requestRejection=401）。 */
+function makeFakeConnection() {
+  const calls = { authorizeIndex: 0, requestRejection: 0 };
+  const connection = {
+    authorizeIndex() { calls.authorizeIndex += 1; return false; },
+    requestRejection() { calls.requestRejection += 1; return 401; },
+  };
+  return { connection, calls };
+}
+
+/** open-access 门禁 harness：带 connection + inject + ctx.get 的 fake ctx。 */
+function makeOpenAccessHarness(settingsValue, connection) {
+  const registered = [];
+  const updates = [];
+  const ctx = {
+    effect: (fn) => { fn(); },
+    on: () => {},
+    // 对齐 cordis ctx.inject：服务可用时同步回调（真实实现为就绪后回调）。
+    inject: (names, cb) => { cb(ctx); },
+    get: (name) => (name === "connection" ? connection : undefined),
+    tools: { register: () => {} },
+    systemPrompt: { section: () => {} },
+    settings: { register: () => ({ get: () => settingsValue ?? {}, update: async (patch) => { updates.push(patch); } }) },
+    llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
+    attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
+    agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+    webServer: { register: (route) => { registered.push(route); return () => {}; } },
+    connection,
+  };
+  return { ctx, registered, updates };
+}
+
+const flushMicro = () => new Promise((resolve2) => setTimeout(resolve2, 0));
+
+const openAccessGate = gate(
+  "open-access",
+  async () => {
+    const created = ensureEntryStubs();
+    try {
+      const mod = await import(pathToFileURL(join(ROOT, "index.mjs")).href);
+      const problems = [];
+      const flush = flushMicro;
+
+      // 启动施加：开关开启 + connection 可用 → apply 即遮蔽鉴权（authorizeIndex=true / requestRejection=undefined）
+      {
+        const fake = makeFakeConnection();
+        const { ctx } = makeOpenAccessHarness({ openAccess: true }, fake.connection);
+        mod.apply(ctx);
+        await flush();
+        if (fake.connection.authorizeIndex() !== true) problems.push("启动施加后 authorizeIndex 未放行");
+        if (fake.connection.requestRejection() !== undefined) problems.push("启动施加后 requestRejection 未放行");
+        if (fake.connection.__dshRiderAuthOriginal === undefined) problems.push("启动施加未保存原实现标记");
+      }
+      // 开关关闭 → 启动不动 connection
+      {
+        const fake = makeFakeConnection();
+        const { ctx } = makeOpenAccessHarness({}, fake.connection);
+        mod.apply(ctx);
+        await flush();
+        if (fake.connection.authorizeIndex() !== false) problems.push("开关关闭时启动不应遮蔽 authorizeIndex");
+      }
+      // ctx 无 inject（极端 fake）→ 启动路径不崩
+      {
+        const fake = makeFakeConnection();
+        const { ctx } = makeOpenAccessHarness({ openAccess: true }, fake.connection);
+        delete ctx.inject;
+        try {
+          mod.apply(ctx);
+          await flush();
+        } catch (error) {
+          problems.push(`无 inject 的 ctx 启动路径崩溃：${error.message}`);
+        }
+      }
+
+      // 路由：GET 状态 / POST 开关 / 400 / 405 / connection 缺失
+      const fake = makeFakeConnection();
+      const { ctx, registered, updates } = makeOpenAccessHarness({ openAccess: false }, fake.connection);
+      mod.apply(ctx);
+      const route = registered.find((r) => r.path === "/api/dsh-rider-open-access");
+      if (!route || typeof route.handler !== "function") {
+        problems.push("未注册 /api/dsh-rider-open-access 路由");
+      } else {
+        const call = (method, body) => callUpload(route.handler, {
+          method,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        });
+
+        const g1 = await call("GET");
+        if (g1.status !== 200 || g1.body?.ok !== true || g1.body?.enabled !== false || g1.body?.bypassActive !== false) {
+          problems.push(`GET 状态错误：HTTP ${g1.status} ${g1.raw}`);
+        }
+        // POST 开启：settings update + 即时遮蔽
+        const on = await call("POST", { enabled: true });
+        if (on.status !== 200 || on.body?.ok !== true || on.body?.enabled !== true || on.body?.bypassActive !== true) {
+          problems.push(`POST 开启失败：HTTP ${on.status} ${on.raw}`);
+        }
+        if (!updates.some((u) => u?.openAccess === true)) problems.push("POST 开启未写 settings");
+        if (fake.connection.requestRejection() !== undefined) problems.push("POST 开启后 requestRejection 未放行");
+        // POST 关闭：即时还原原实现（行为恢复 + 遮蔽标记清除）
+        const off = await call("POST", { enabled: false });
+        if (off.status !== 200 || off.body?.enabled !== false || off.body?.bypassActive !== false) problems.push(`POST 关闭失败：${off.raw}`);
+        if (fake.connection.authorizeIndex() !== false) problems.push("POST 关闭后 authorizeIndex 未还原");
+        if (fake.connection.__dshRiderAuthOriginal !== undefined) problems.push("POST 关闭后遮蔽标记未清除");
+        // 再次关闭（未遮蔽时的 no-op 幂等）
+        const offAgain = await call("POST", { enabled: false });
+        if (offAgain.status !== 200 || offAgain.body?.bypassActive !== false) problems.push(`重复关闭幂等失败：${offAgain.raw}`);
+        // 非布尔 enabled → 400
+        const bad = await call("POST", { enabled: "yes" });
+        if (bad.status !== 400) problems.push(`非布尔 enabled 未被 400 拒绝：HTTP ${bad.status} ${bad.raw}`);
+        // 405
+        const put = await call("PUT", { enabled: true });
+        if (put.status !== 405) problems.push(`PUT 未被 405 拒绝：HTTP ${put.status}`);
+      }
+      // connection 缺失：GET 返回 bypassActive=false；POST 不崩（安全降级）
+      {
+        const { ctx: ctxNoConn, registered: regNoConn } = makeOpenAccessHarness({}, undefined);
+        mod.apply(ctxNoConn);
+        const route2 = regNoConn.find((r) => r.path === "/api/dsh-rider-open-access");
+        const g2 = await callUpload(route2.handler, { method: "GET" });
+        if (g2.status !== 200 || g2.body?.bypassActive !== false) problems.push(`connection 缺失 GET 应返回 bypassActive=false：${g2.raw}`);
+        const p2 = await callUpload(route2.handler, { method: "POST", body: JSON.stringify({ enabled: true }), headers: { "content-type": "application/json" } });
+        if (p2.status !== 200 || p2.body?.bypassActive !== false) problems.push(`connection 缺失 POST 未安全降级：${p2.raw}`);
+      }
+      // connection 形状不符（缺方法）：setBrowserAuthBypass 拒绝，不崩
+      {
+        const { ctx: ctxBad, registered: regBad } = makeOpenAccessHarness({ openAccess: true }, {});
+        try {
+          mod.apply(ctxBad);
+          await flush();
+        } catch (error) {
+          problems.push(`connection 形状不符时启动路径崩溃：${error.message}`);
+        }
+      }
+      return problems;
+    } finally {
+      removeEntryStubs(created);
+    }
+  },
+  async () => {
+    const problems = [];
+    // 自证：fake connection 的拒绝行为可观测（门禁断言的基石）
+    const fake = makeFakeConnection();
+    if (fake.connection.authorizeIndex() !== false || fake.connection.requestRejection() !== 401) {
+      problems.push("自证失败：fake connection 未按原版行为拒绝");
+    }
+    // 自证：undefined connection 的 GET/POST 不抛（经 makeOpenAccessHarness 走真实 handler 需 stubs，
+    // 这里直接验证 harness 对 undefined 服务的容错路径已由 checkRepo 覆盖，此处验证 harness 本身可构造）
+    const { ctx } = makeOpenAccessHarness({}, undefined);
+    if (ctx.get("connection") !== undefined) problems.push("自证失败：harness get(connection) 应返回 undefined");
+    return problems;
+  },
+);
+
 /* -------------------------- client bundle 门禁 -------------------------- */
 
 const CLIENT_PATH = join(ROOT, "client", "index.js");
@@ -1096,7 +1252,7 @@ const clientExecuteGate = gate(
     await flushMicrotasks();
     const locale = localeRegistrations.find((r) => r.ns === "dsh-rider");
     if (!locale || !locale.dicts.zh || !locale.dicts.en) problems.push("locale 未注册 dsh-rider 中英字典");
-    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel", "composerUploadToggle", "composerUploadHint", "uploadMaxMBLabel", "uploadMaxMBHint", "attachTitle", "attachStaging", "attachStashFailed", "attachTooLarge", "attachNoCwd", "attachRemove", "attachCopyRef", "attachRefCopied", "attachClear", "attachClearing", "attachRestaged", "attachButton", "dropTitle", "dropSub"]) {
+    else for (const key of ["title", "description", "visionProvider", "visionModel", "visionPrompt", "save", "reset", "overridden", "loading", "loadFailed", "composerCaptureToggle", "composerCaptureHint", "composerTitle", "composerFailed", "declareTitle", "declareDesc", "declareModelLabel", "declareStatus", "declareDeclared", "declareNotDeclared", "declareBtn", "declareRemoveBtn", "declareDoing", "declareDone", "declareRemoved", "declareFailed", "declareNoVisionModel", "composerUploadToggle", "composerUploadHint", "uploadMaxMBLabel", "uploadMaxMBHint", "attachTitle", "attachStaging", "attachStashFailed", "attachTooLarge", "attachNoCwd", "attachRemove", "attachCopyRef", "attachRefCopied", "attachClear", "attachClearing", "attachRestaged", "attachButton", "dropTitle", "dropSub", "openAccessTitle", "openAccessDesc", "openAccessOffStatus", "openAccessOnStatus", "openAccessPendingStatus", "openAccessFailed"]) {
       if (typeof locale.dicts.zh[key] !== "string" || typeof locale.dicts.en[key] !== "string") problems.push(`locale 字典缺键：${key}`);
     }
     const page = slotRegistrations.find((r) => r.opts?.name === "settings.section" && r.opts?.id === "dsh-rider");
@@ -1257,7 +1413,7 @@ const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex >= 0 ? process.argv[onlyIndex + 1] : null;
 let failed = 0;
 
-for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, stashExecuteGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
+for (const g of [packageJsonGate, patchYamlGate, patchEntriesGate, entryGate, visionExecuteGate, stashExecuteGate, openAccessGate, clientBundleGate, clientExecuteGate, mdLinksGate, decisionsGate]) {
   if (only && g.name !== only) continue;
   const self = await g.selfTest();
   if (self.length > 0) {

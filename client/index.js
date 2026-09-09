@@ -110,6 +110,12 @@ window.__ModuleLoader__.load({
       declareRemoved: 'Removed \u2014 restart dsh web to take effect',
       declareFailed: 'Failed',
       declareNoVisionModel: 'Set visionProvider/visionModel above first',
+      openAccessTitle: 'Disable token verification (open access)',
+      openAccessDesc: 'When enabled, accessing dsh web no longer requires the ?token=\u2026 URL or a login cookie \u2014 just open the instance address in any browser. Takes effect immediately (no restart); turning it off restores verification instantly. Caution: this opens the whole API surface too (sessions, tools, model calls) \u2014 anything that can reach the address gets full control of this instance. Only enable on a personal machine or a trusted network. The switch persists in settings and survives dsh web restarts.',
+      openAccessOffStatus: 'Off: access requires the token URL or a logged-in cookie (default)',
+      openAccessOnStatus: 'On: this instance is currently reachable without any token',
+      openAccessPendingStatus: 'On, but not yet applied to the running service \u2014 reload the page or restart dsh web and try again',
+      openAccessFailed: 'Operation failed',
     }
 
     const zh = {
@@ -176,6 +182,12 @@ window.__ModuleLoader__.load({
       declareRemoved: '已移除——重启 dsh web 生效',
       declareFailed: '失败',
       declareNoVisionModel: '请先在上方填写 visionProvider/visionModel',
+      openAccessTitle: '关闭 token 验证（免 token 访问）',
+      openAccessDesc: '开启后访问 dsh web 不再需要 ?token=… 链接或登录 Cookie——任何浏览器直接打开本实例地址即可进入，立即生效、无需重启；关闭即时恢复验证。注意：这会同时开放全部 API（会话、工具、模型调用），任何能访问该地址的设备都完全可控本实例，请仅在个人电脑或可信网络中开启。开关随设置持久，重启 dsh web 后仍保持。',
+      openAccessOffStatus: '已关闭：访问需要 token 链接或已登录 Cookie（默认）',
+      openAccessOnStatus: '已开启：本实例当前无需 token 即可访问',
+      openAccessPendingStatus: '已开启，但尚未在运行中的服务上生效——刷新页面或重启 dsh web 后重试',
+      openAccessFailed: '操作失败',
     }
 
     /** 模块级文案函数：优先跟随 ctx.locale 绑定，回退中文字典。apply 时增强。 */
@@ -1316,6 +1328,91 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「关闭 token 验证」卡片：开关持久化在 host 侧 dsh-rider settings
+     * （openAccess，live），开启时 host 在运行中的 connection 服务上遮蔽鉴权
+     * 入口（authorizeIndex/requestRejection）——任何浏览器无需 token 即可访问，
+     * 立即生效、无需重启；关闭即时恢复验证。数据经自建路由
+     * /api/dsh-rider-open-access 读写（GET 状态 / POST {enabled}）。
+     * bypassActive 表示遮蔽当前是否已作用在运行中的服务上。
+     * 不接 props，自包含（模块级 t + useState，对齐其它开关卡片）。
+     */
+    function OpenAccessCard() {
+      const [enabled, setEnabled] = useState(false)
+      const [bypassActive, setBypassActive] = useState(false)
+      const [loaded, setLoaded] = useState(false)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(null)
+
+      const applyStatus = useCallback((body) => {
+        setEnabled(body?.enabled === true)
+        setBypassActive(body?.bypassActive === true)
+        setLoaded(true)
+      }, [])
+
+      const refresh = useCallback(async () => {
+        try {
+          const r = await fetch('/api/dsh-rider-open-access', { headers: { accept: 'application/json' } })
+          const body = await r.json()
+          if (body?.ok !== true) throw new Error(body?.message ?? 'load failed')
+          applyStatus(body)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      }, [applyStatus])
+      useEffect(() => { void refresh() }, [refresh])
+
+      const onToggle = async (e) => {
+        const next = !!(e && e.target && e.target.checked)
+        if (busy) return
+        setBusy(true)
+        setError(null)
+        try {
+          const r = await fetch('/api/dsh-rider-open-access', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+          })
+          const body = await r.json()
+          if (body?.ok !== true) throw new Error(body?.message ?? 'toggle failed')
+          applyStatus(body)
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err))
+        }
+        setBusy(false)
+      }
+
+      let statusKey = null
+      if (loaded && !error) {
+        if (!enabled) statusKey = 'openAccessOffStatus'
+        else if (bypassActive) statusKey = 'openAccessOnStatus'
+        else statusKey = 'openAccessPendingStatus'
+      }
+
+      return h('div', { style: editorStyle, 'data-dsh-rider-vision-overlay': 'true' },
+        h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8 } },
+          h('input', {
+            type: 'checkbox',
+            checked: enabled,
+            disabled: busy || !loaded,
+            onChange: onToggle,
+            style: {
+              marginTop: 4,
+              width: 16, height: 16,
+              accentColor: 'var(--dsh-alias-accent-primary, #4f9eff)',
+              cursor: 'pointer',
+            },
+          }),
+          h('div', { style: { flex: 1, minWidth: 0 } },
+            h('h3', { style: Object.assign({}, titleStyle, { fontSize: 14, margin: 0 }) }, t('openAccessTitle')),
+            h('p', { style: hintStyle }, t('openAccessDesc')),
+            statusKey ? h('p', { style: mutedStyle }, t(statusKey)) : null,
+            error ? h('p', { style: errorStyle }, t('openAccessFailed') + '\uff1a' + error) : null,
+          ),
+        ),
+      )
+    }
+
+    /**
      * 回形针按钮（conversation.input.left）：打开文件选择器（multi-select，无 accept
      * 过滤），选中的文件整批 stash（图片也落盘 + 缩略图）。不接 props 的槽位组件，
      * 通过模块级 store 路由到当前会话。
@@ -1632,6 +1729,8 @@ window.__ModuleLoader__.load({
         h(ComposerCaptureToggleCard),
         // 对话文件暂存开关（写 localStorage；dock/全窗入口读同一 store）
         h(ComposerUploadToggleCard),
+        // 关闭 token 验证开关（host 侧遮蔽 connection 鉴权入口，免 token 访问，立即生效）
+        h(OpenAccessCard),
         // 图片理解卡片（绕过 DSH 对话流图片准入拦截，直连视觉模型）
         h(ImageUnderstandCard),
       )

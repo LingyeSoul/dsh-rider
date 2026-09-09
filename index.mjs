@@ -76,6 +76,19 @@
  *     下"粘贴图片看图"的正解。取消信号用 res 的 'close'（客户端真断开）而非 req 的
  *     'close'（后者在请求体读完即触发，会把进行中的视觉调用误判为取消 → 499）。
  *
+ * 能力五：关闭 token 验证（免 token 访问）—— `/api/dsh-rider-open-access`。
+ *   - 背景：dsh web 的浏览器入口默认需要启动时打印的 `?token=…` 链接（换取 30 天
+ *     Cookie）。本机个人使用时每次都要翻找链接，需要一个「关闭 token 验证」开关。
+ *   - 实现：dsh 全部浏览器鉴权共用 connection 服务（dsh-client-connection）的
+ *     两个方法——`authorizeIndex`（index 页 token↔Cookie 校验，frontend-static
+ *     的 fallback 调用）与 `requestRejection`（/api RPC 与 api-gateway WebSocket
+ *     升级的 Host/Origin fence + Cookie 校验，返回 undefined=放行）。开启开关时
+ *     在宿主进程内以实例属性遮蔽这两个方法（原实现保存在标记属性里，关闭时
+ *     回写还原），任何浏览器无需 token 直接进入。立即生效、无需重启；关闭开关
+ *     即时恢复验证。开关持久化在 dsh-rider settings（`openAccess`，live 写入），
+ *     重启后 apply 经 ctx.inject(['connection']) 重新施加。connection 缺失或
+ *     方法改名时安全降级（applied=false，不破坏宿主）。
+
  * 背景见 decisions/implemented/2026-08-14-native-ddg-kit-tool.md、
  * 2026-08-14-vision-preprocessor-tool.md、
  * 2026-08-15-vision-settings-section-page.md 与
@@ -544,10 +557,62 @@ const VISION_SETTINGS_SCHEMA = z.object({
   visionModel: z.string(),
   visionPrompt: z.string(),
   uploadMaxBytes: z.number(),
+  openAccess: z.boolean(),
 })
+
+/* =========================================================================
+ * 能力五：关闭 token 验证（免 token 访问）
+ * ========================================================================= */
+
+/**
+ * 在宿主进程内开启/关闭浏览器鉴权（免 token 访问）。
+ * dsh 全部浏览器入口共用 connection 服务（dsh-client-connection 的
+ * HostConnectionService 单实例）的两个方法：
+ *  - authorizeIndex(req,res)：index 页的 token 换取 / Cookie 校验（frontend-static
+ *    的 fallback seat 调用；返回 false 时响应已由其写出）；
+ *  - requestRejection(req)：/api RPC prefix（client-connection）与 api-gateway 的
+ *    WebSocket 升级路由共用的 Host/Origin fence + Cookie 校验（undefined=放行）。
+ * 以实例属性遮蔽（shadow）原型方法实现放行；原实现保存在 `__dshRiderAuthOriginal`
+ * 标记属性中，关闭时删除遮蔽还原。校验逻辑本身不动，只是入口被短路；dsh 升级
+ * 若方法改名，此处返回 false 安全降级（不 patch、不破坏宿主）。
+ *
+ * @returns 是否成功作用于 connection（服务缺失/形状不符为 false）。
+ */
+function setBrowserAuthBypass(connection, bypass) {
+  if (!connection || typeof connection !== 'object') return false
+  if (typeof connection.authorizeIndex !== 'function' || typeof connection.requestRejection !== 'function') return false
+  if (bypass) {
+    if (connection.__dshRiderAuthOriginal === undefined) {
+      connection.__dshRiderAuthOriginal = {
+        authorizeIndex: connection.authorizeIndex,
+        requestRejection: connection.requestRejection,
+      }
+    }
+    connection.authorizeIndex = () => true
+    connection.requestRejection = () => undefined
+    return true
+  }
+  if (connection.__dshRiderAuthOriginal !== undefined) {
+    const original = connection.__dshRiderAuthOriginal
+    connection.authorizeIndex = original.authorizeIndex
+    connection.requestRejection = original.requestRejection
+    delete connection.__dshRiderAuthOriginal
+  }
+  return true
+}
 
 export function apply(ctx) {
   const visionSettings = ctx.settings.register(VISION_SETTINGS_NS, VISION_SETTINGS_SCHEMA, { applies: 'live' })
+
+  /* 启动即施加（开关开启时）：ctx.inject 等 connection 服务就绪后遮蔽鉴权入口。
+   * 失败只告警，不阻断启动。 */
+  if (visionSettings.get()?.openAccess === true && typeof ctx.inject === 'function') {
+    ctx.inject(['connection'], (connCtx) => {
+      if (!setBrowserAuthBypass(connCtx.connection, true)) {
+        console.warn('dsh-rider: 未能施加免 token 访问（connection 服务缺失或形状不符）')
+      }
+    })
+  }
 
   ctx.tools.register(defineTool({
     name: 'duckduckgo_search',
@@ -1124,13 +1189,58 @@ export function apply(ctx) {
           }
         },
       })
+      /* 关闭 token 验证路由：'/api/dsh-rider-open-access'（能力五）。
+       * GET：状态——enabled（settings 开关）+ bypassActive（运行中的 connection
+       *   当前是否被遮蔽放行）。
+       * POST {enabled:boolean}：写 settings（live）并立即在运行中的 connection
+       *   上施加/还原鉴权遮蔽——无需重启，关闭即时恢复验证。 */
+      const stopOpenAccess = ctx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-rider-open-access',
+        handler: async (req, res) => {
+          const send = (status, body) => {
+            res.statusCode = status
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify(body))
+          }
+          try {
+            const connection = ctx.get?.('connection')
+            if (req?.method === 'GET') {
+              send(200, {
+                ok: true,
+                enabled: visionSettings.get()?.openAccess === true,
+                bypassActive: connection?.__dshRiderAuthOriginal !== undefined,
+              })
+              return
+            }
+            if (req?.method !== 'POST') {
+              send(405, { ok: false, message: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req)
+            if (typeof body.enabled !== 'boolean') {
+              send(400, { ok: false, message: 'enabled 必须是布尔值' })
+              return
+            }
+            await visionSettings.update({ openAccess: body.enabled })
+            setBrowserAuthBypass(connection, body.enabled)
+            send(200, {
+              ok: true,
+              enabled: body.enabled,
+              bypassActive: connection?.__dshRiderAuthOriginal !== undefined,
+            })
+          } catch (error) {
+            send(500, { ok: false, message: error instanceof Error ? error.message : String(error) })
+          }
+        },
+      })
       /* 发送时注入：agent/pre-step wave —— 若该会话有暂存附件且本步有已认领的
        * 用户消息，把附件清单作为一条 user 消息折进决策（紧跟首条已认领消息之前），
        * 然后消费暂存（卡片自动消失）。委托 next() 产出下游决策后再折入（与官方
        * dsh-agent-instructions 的注入模式同构）。注册在 webServer effect 之外：
        * 注入不依赖 webServer，极端组合下仍可用。 */
-      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.(); stopStash?.(); stopRestage?.(); stopStashRead?.() }
-    }, 'dsh-rider: vision settings + understand + declare + stash routes')
+      return () => { stop?.(); stopUnderstand?.(); stopDeclare?.(); stopStash?.(); stopRestage?.(); stopStashRead?.(); stopOpenAccess?.() }
+    }, 'dsh-rider: vision settings + understand + declare + stash + open-access routes')
   }
 
   /* agent/pre-step 注入（不依赖 webServer；pending 为模块级，与 stash 路由共享）。 */
