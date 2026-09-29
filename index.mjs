@@ -56,17 +56,13 @@
  *     超限报错并引导「大文件直接放项目目录后在消息里写路径」。
  *
  * 能力三：前置视觉设置页 HTTP 路由 —— `/api/dsh-rider-vision`。
- *   - 背景：dsh「设置→插件→插件配置」的 settings.plugin.item 卡片只在目标
- *     settings namespace 被 apiproxy 显式暴露给 Web client 时渲染
- *     （WEB_SETTINGS_NAMESPACES 硬编码 allowlist，rc.6 尚未把 expose 决策
- *     下放到 settings.register()，见 dsh-host-apiproxy 注释「deferred work」）。
- *     dsh-rider 作为第三方插件，其 namespace 不在 allowlist，卡片必然
- *     return null（available=false）。解法对齐 plugin-registry 的薄控制台：
- *     client half 改注册顶级 settings.section 设置页（inject 返回空对象，
- *     零 namespace 门槛），数据通道走 Node half 自建的 HTTP 路由，handler
- *     在 host 进程内直连 ctx.settings scope 读写（不经 wire，绕开暴露限制；
- *     register 时 applies:'live'，写即 commit+emit，零重启热更新）。
- *   - GET 读 dsh-rider 段三个字段的 user 层覆盖值与 resolved 值；
+ *   - 背景：官方 settings wire 只暴露宿主 allowlist 内的 namespace，第三方
+ *     插件段不可达。解法对齐 plugin-registry 的薄控制台：client half 注册顶级
+ *     settings.section 设置页（inject 返回空对象，零 namespace 门槛），数据
+ *     通道走 Node half 自建的 HTTP 路由，handler 在 host 进程内直连
+ *     ctx.settings（dsh ≥0.2.0：schema 经 Config 导出、describe()/update()/
+ *     replace() 按 profile entry id 寻址，写 profile 层持久化、live 生效）。
+ *   - GET 读 dsh-rider 段四个字段的 user 层覆盖值与 resolved 值；
  *   - POST 写：update 合并 patch（字段置值）/ replace({}) 清空 user 层（重置）。
  *   - POST '/api/dsh-rider-vision/understand'：图片理解——client half 设置页的
  *     「图片理解」卡片与对话 dock 粘贴捕获的图片（base64 data URL）经此路由，handler
@@ -550,14 +546,18 @@ async function runVisionCall(ctx, { provider, model, image, prompt, signal }) {
   }
 }
 
-/** dsh-rider settings 命名空间：前置视觉理解的默认模型选择 + 文件上传配置（均为可选）。 */
+/** dsh-rider 配置段。dsh ≥0.2.0 settings 契约：schema 经 `export const Config`
+ * 声明（运行时 ctx.settings.register 已移除），ns = profile entry id（插入行
+ * id `dsh-rider`）。全字段 .volatile() → live 表单（describe()/update()/mutate()
+ * 按 volatile 投影，编辑零重启）。本插件自带 settings.section 设置页，宿主为
+ * 本 entry auto 生成的设置表单已在 apply 内 configure({auto:false}) 关闭。 */
 const VISION_SETTINGS_NS = 'dsh-rider'
-const VISION_SETTINGS_SCHEMA = z.object({
-  visionProvider: z.string(),
-  visionModel: z.string(),
-  visionPrompt: z.string(),
-  uploadMaxBytes: z.number(),
-  openAccess: z.boolean(),
+export const Config = z.object({
+  visionProvider: z.string().volatile().description('默认视觉模型 provider（如 siliconflow），留空自动发现'),
+  visionModel: z.string().volatile().description('默认视觉模型 id（如 zai-org/GLM-5.2），留空自动发现'),
+  visionPrompt: z.string().volatile().description('vision_understand 缺省 prompt，留空用内置默认'),
+  uploadMaxBytes: z.number().volatile().description('对话上传单文件上限（MB，0=默认）'),
+  openAccess: z.boolean().volatile().description('免 token 访问：关闭浏览器鉴权，重启后自动施加'),
 })
 
 /* =========================================================================
@@ -601,8 +601,34 @@ function setBrowserAuthBypass(connection, bypass) {
   return true
 }
 
-export function apply(ctx) {
-  const visionSettings = ctx.settings.register(VISION_SETTINGS_NS, VISION_SETTINGS_SCHEMA, { applies: 'live' })
+export function apply(ctx, config) {
+  /* dsh ≥0.2.0 settings 契约：值读取走 apply(ctx, config) 第二参的 volatile
+   * getter（config.<field>.get() 返回当前 live 值），写入走
+   * ctx.settings.update/replace(VISION_SETTINGS_NS, ...)（ns = entry id）。
+   * 这里保持 { get() } 形状的 shim，内部 helpers（resolveUploadMaxBytes/
+   * resolveVisionModel/路由快照）签名不变。 */
+  const visionSettings = {
+    get: () => {
+      if (config === null || typeof config !== 'object') return {}
+      const read = (field) => (typeof config[field]?.get === 'function' ? config[field].get() : undefined)
+      return {
+        visionProvider: read('visionProvider'),
+        visionModel: read('visionModel'),
+        visionPrompt: read('visionPrompt'),
+        uploadMaxBytes: read('uploadMaxBytes'),
+        openAccess: read('openAccess'),
+      }
+    },
+  }
+
+  /* 关闭宿主为本 entry auto 生成的设置表单页（本插件自带 settings.section
+   * 设置页，避免双入口）；范式对齐官方 dsh-agent-default-model 的
+   * configure({ auto: false }, fiber)。 */
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settings'], (child) => {
+      child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
+    })
+  }
 
   /* 启动即施加（开关开启时）：ctx.inject 等 connection 服务就绪后遮蔽鉴权入口。
    * 失败只告警，不阻断启动。 */
@@ -764,11 +790,11 @@ export function apply(ctx) {
 
   /* 前置视觉设置页 HTTP 路由（见文件头「能力三」）。client half 的
    * settings.section 设置页经此 self-built route 读写 dsh-rider 段——
-   * host 进程内直连 ctx.settings scope，不经 apiproxy wire 的 namespace
-   * 暴露限制（第三方插件 namespace 不在 WEB_SETTINGS_NAMESPACES
-   * allowlist），写即 commit+emit（register 时 applies:'live'），零重启。 */
+   * host 进程内直连 ctx.settings（dsh ≥0.2.0：describe() 按 entry id 寻址、
+   * update/replace 写 profile 层并持久化，live 生效零重启）。 */
   if (ctx.webServer !== undefined) {
     ctx.effect(() => {
+      const settingsApi = () => ctx.get('settings')
       const stop = ctx.webServer.register({
         kind: 'exact',
         path: '/api/dsh-rider-vision',
@@ -779,7 +805,7 @@ export function apply(ctx) {
             res.end(JSON.stringify(body))
           }
           const readUserLayer = () => {
-            const settings = ctx.get('settings')
+            const settings = settingsApi()
             const descriptor = settings?.describe?.()?.find?.((d) => d.ns === VISION_SETTINGS_NS)
             const user = descriptor?.user
             return typeof user === 'object' && user !== null ? user : {}
@@ -807,7 +833,7 @@ export function apply(ctx) {
             }
             const body = await readJsonBody(req)
             if (body.reset === true) {
-              await visionSettings.replace({})
+              await settingsApi()?.replace?.(VISION_SETTINGS_NS, {})
             } else {
               const patch = {}
               for (const field of ['visionProvider', 'visionModel', 'visionPrompt', 'uploadMaxBytes']) {
@@ -821,7 +847,7 @@ export function apply(ctx) {
                   }
                 }
               }
-              await visionSettings.update(patch)
+              await settingsApi()?.update?.(VISION_SETTINGS_NS, patch)
             }
             const user = readUserLayer()
             send(200, { ok: true, resolved: snapshot(), user })
@@ -1222,7 +1248,7 @@ export function apply(ctx) {
               send(400, { ok: false, message: 'enabled 必须是布尔值' })
               return
             }
-            await visionSettings.update({ openAccess: body.enabled })
+            await ctx.get('settings')?.update?.(VISION_SETTINGS_NS, { openAccess: body.enabled })
             setBrowserAuthBypass(connection, body.enabled)
             send(200, {
               ok: true,

@@ -63,17 +63,19 @@
 **视觉模型选择优先级**：
 
 1. 工具参数 `provider` + `model`（显式指定跳过 dsh-rider 自己的自动发现过滤，但**绕不过** pi-ai provider 在 `ctx.llm.stream` 内部对 `model.input` 的强制校验——见下文「为视觉模型补图片模态声明」）；
-2. settings 配置（`$DSH_HOME/settings.yaml` 的 `dsh-rider:` 段，
+2. settings 配置（dsh ≥0.2.0：profile entry config 的 `dsh-rider` 段，
    `visionProvider` / `visionModel` / `visionPrompt`，live 生效）；
 3. 自动发现：遍历 dsh 已注册提供商，取第一个声明支持图片输入的模型
    （`inputModalities` 含 `image`）。
 
 ```yaml
-# settings.yaml 示例：固定视觉模型（可选）
-dsh-rider:
-  visionProvider: siliconflow
-  visionModel: zai-org/GLM-5.2
-  visionPrompt: 请详细描述这张图片的内容
+# profile 层 cordis.patch.yml 示例：固定视觉模型（可选；推荐直接用设置页）
+- id: dsh-rider
+  name: dsh-rider
+  config:
+    visionProvider: siliconflow
+    visionModel: zai-org/GLM-5.2
+    visionPrompt: 请详细描述这张图片的内容
 ```
 
 **注意**：pi-ai 手写配置的提供商（如 siliconflow）若模型条目未声明
@@ -191,18 +193,21 @@ dsh web 生效**（pi-ai 路由是注册级事实）。
 ## 设置界面配置（推荐）
 
 装包后，dsh 设置导航会出现 **dsh-rider** 独立设置页：四个字段（视觉提供商 /
-视觉模型 / 默认指令 / 单文件暂存上限（MB），保存即写入 `dsh-rider`
-settings 命名空间，live 生效无需重启） + 五张卡片（「为视觉模型补图片模态声明」
+视觉模型 / 默认指令 / 单文件暂存上限（MB），保存即写入 profile 层的
+`dsh-rider` entry config（dsh ≥0.2.0 settings 契约：Config 导出 + entry id
+寻址），live 生效无需重启） + 五张卡片（「为视觉模型补图片模态声明」
 「对话粘贴捕获开关」「对话文件暂存开关」「关闭 token 验证」「图片理解」）。等效于
-手改 `settings.yaml`：
+手改 profile 层 `cordis.patch.yml`（重启保持）：
 
 ```yaml
-dsh-rider:
-  visionProvider: siliconflow
-  visionModel: zai-org/GLM-5.2
-  visionPrompt: 请详细描述这张图片的内容
-  uploadMaxBytes: 32                # 单文件暂存上限（MB，0 = 默认 32）
-  openAccess: false                 # 关闭 token 验证：开启后免 token 访问（仅限可信网络）
+- id: dsh-rider
+  name: dsh-rider
+  config:
+    visionProvider: siliconflow
+    visionModel: zai-org/GLM-5.2
+    visionPrompt: 请详细描述这张图片的内容
+    uploadMaxBytes: 32                # 单文件暂存上限（MB，0 = 默认 32）
+    openAccess: false                 # 关闭 token 验证：开启后免 token 访问（仅限可信网络）
 ```
 
 > **为什么是独立设置页而非「设置→插件→插件配置」卡片**：dsh rc.6 的「插件
@@ -237,7 +242,9 @@ DuckDuckGo 经代理偶发风控（BOT_CHALLENGE）：插件按冷却等待后�
 
 ## 安装
 
-官方 bundle 插件，经 web profile 层栈安装（装完**重启 web**；依赖 ddg-kit 随包自动安装）：
+官方 bundle 插件，经 web profile 层栈安装（装完**重启 web**；依赖 ddg-kit 随包自动安装）。
+**要求 dsh ≥0.2.0-rc.2**（0.2.0 起 settings 契约改为 Config 导出 + entry id 寻址，
+client 禁止 import Harness Client 包；0.1.x 宿主请用 dsh-rider 0.5.x）：
 
 ```sh
 # git 源（推荐，一行安装）

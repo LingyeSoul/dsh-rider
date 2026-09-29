@@ -16,9 +16,10 @@
  * 订阅模块级 controller 单例的 store，文案 t 为模块级函数，零 props 依赖。
  *
  * 依赖纪律（client bundle purity）：
- *  - require 只允许平台静态词（react / react-dom / @deepseek-ai/dsh-client-ui-primitives）；
+ *  - require 只允许平台静态词（react / react-dom）；
  *  - 跨包协作走 cordis 服务注入（slots / locale），不 import 任何
- *    @deepseek-ai 官方 client 包（client-modules 禁止跨插件值 import）；
+ *    @deepseek-ai 官方 client 包（官方 0.2.0 契约明令禁止，含
+ *    dsh-client-ui-primitives——Button/Input 已改为本地原生元素 + 主题 token）；
  *  - 表单状态机自实现（staged draft、save 单点写入、空文本=清除、overridden
  *    以 user 层 presence 判定），resolved/user 两层来自 GET 响应。
  *
@@ -38,8 +39,76 @@ window.__ModuleLoader__.load({
     // react-dom 在 dsh-client-web 的平台静态词表内（见 dsh-client-web/lib/index.js 的
     // module map），与官方 dsh-client-ui-trajectory 一样可在 client bundle 直接 require。
     const { createPortal } = require('react-dom')
-    const { Button, Input } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement.bind(React)
+
+    /* 官方 0.2.0 插件契约（cordis-plugin-development/ui-plugin）：client bundle
+     * 不得 import 任何 Harness Client 包（含 dsh-client-ui-primitives）。本地
+     * Button/Input 以原生元素 + 宿主主题 token（--dsw-alias-*，dsh-client-ui-theme）
+     * 实现，接口对齐原 primitives 的 (variant/size) / 受控文本输入用法。 */
+    const buttonBaseStyle = {
+      font: 'inherit',
+      fontSize: 12,
+      lineHeight: '20px',
+      borderRadius: 6,
+      padding: '4px 12px',
+      cursor: 'pointer',
+      border: '1px solid transparent',
+      whiteSpace: 'nowrap',
+    }
+    const buttonVariantStyle = {
+      primary: {
+        color: 'var(--dsw-alias-label-primary-foreground, #fff)',
+        background: 'var(--dsw-alias-button-primary-fill, #4f9eff)',
+        borderColor: 'var(--dsw-alias-button-primary-fill, #4f9eff)',
+      },
+      outline: {
+        color: 'var(--dsw-alias-label-primary, inherit)',
+        background: 'transparent',
+        borderColor: 'var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+      },
+      ghost: {
+        color: 'var(--dsw-alias-label-secondary, inherit)',
+        background: 'transparent',
+        borderColor: 'transparent',
+      },
+    }
+
+    /** 本地按钮组件（替代 primitives Button）：variant = primary|outline|ghost。 */
+    function Button(props) {
+      const variant = buttonVariantStyle[props.variant] ? props.variant : 'ghost'
+      const style = Object.assign(
+        {},
+        buttonBaseStyle,
+        buttonVariantStyle[variant],
+        props.disabled === true ? { opacity: 0.5, cursor: 'default' } : null,
+        props.style,
+      )
+      const rest = Object.assign({}, props)
+      delete rest.variant
+      delete rest.style
+      return h('button', Object.assign({ type: 'button' }, rest, { style }))
+    }
+
+    /** 本地单行输入组件（替代 primitives Input）：受控 text input。 */
+    function Input(props) {
+      const style = Object.assign(
+        {
+          font: 'inherit',
+          fontSize: 13,
+          lineHeight: '20px',
+          color: 'var(--dsw-alias-label-primary, inherit)',
+          background: 'var(--dsw-alias-bg-module-platform, transparent)',
+          border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
+          borderRadius: 8,
+          padding: '6px 10px',
+          outline: 'none',
+        },
+        props.style,
+      )
+      const rest = Object.assign({}, props)
+      delete rest.style
+      return h('input', Object.assign({ type: 'text' }, rest, { style }))
+    }
 
     /* ------------------------------ 文案 ------------------------------ */
 

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-rider",
+    "description": "Free web search (DuckDuckGo + Bing fallback), front-loaded vision understanding, composer paste-image capture, drag-drop file stash, and a token-auth toggle."
+  }
+}

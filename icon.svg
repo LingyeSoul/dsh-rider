@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- dsh-rider：骑手徽标——搜索放大镜 + 视觉之眼（官方 Plugin Manager 卡片图标） -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#4f9eff"/>
+  <circle cx="28" cy="28" r="13" fill="none" stroke="#fff" stroke-width="4"/>
+  <line x1="37.5" y1="37.5" x2="49" y2="49" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="28" cy="28" r="5" fill="#fff"/>
+</svg>

@@ -251,7 +251,19 @@ const DSH_TOOLS_STUB_JS = "export function defineTool(options) { return options;
 const DSH_LLM_STUB_PKG = '{"name":"@deepseek-ai/dsh-llm","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
 const DSH_LLM_STUB_JS = "export function createUserMessage(input) { return { id: 'msg-stub', ...input }; }\n";
 const SCHEMASTERY_STUB_PKG = '{"name":"@deepseek-ai/schemastery","version":"0.0.0-stub","type":"module","main":"index.js","exports":{".":"./index.js"}}';
-const SCHEMASTERY_STUB_JS = "const string = () => ({ __type: 'string' });\nconst number = () => ({ __type: 'number' });\nconst boolean = () => ({ __type: 'boolean' });\nexport default { object: (shape) => ({ __shape: shape }), string, number, boolean };\n";
+// dsh ≥0.2.0 契约：字段级链式 meta 方法 volatile()/description()（真实实现见
+// @deepseek-ai/schemastery 的 Schema.prototype.volatile——重复标注抛错，stub 同构）。
+const SCHEMASTERY_STUB_JS = [
+  "const chain = (node) => {",
+  "  node.volatile = () => { if (node.__volatile) throw new TypeError('volatile schema is already wrapped'); node.__volatile = true; return node; };",
+  "  node.description = (text) => { node.__description = text; return node; };",
+  "  return node;",
+  "};",
+  "const string = () => chain({ __type: 'string' });",
+  "const number = () => chain({ __type: 'number' });",
+  "const boolean = () => chain({ __type: 'boolean' });",
+  "export default { object: (shape) => ({ __shape: shape }), string, number, boolean };",
+].join("\n");
 
 /** 仓库无 node_modules 时生成最小 stub（运行后删除）。 */
 function ensureEntryStubs() {
@@ -308,14 +320,16 @@ function checkApply(mod) {
   const sections = [];
   const fakeCtx = {
     on: () => {},
+    // 对齐 cordis ctx.inject：服务可用时同步回调（行使 configure({auto:false}) 路径）。
+    inject: (names, cb) => { cb({ effect: (fn) => { fn(); }, settings: makeSettingsService() }); },
     tools: { register: (tool) => { tools.push(tool); } },
     systemPrompt: { section: (section) => { sections.push(section); } },
-    settings: { register: () => ({ get: () => ({}) }) },
+    settings: makeSettingsService(),
     llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
     attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
     agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
   };
-  mod.apply(fakeCtx);
+  mod.apply(fakeCtx, makeVolatileConfig({}));
   if (tools.length === 0) {
     problems.push("apply() 未注册任何工具");
   } else {
@@ -505,6 +519,37 @@ const entryGate = gate(
 const VISION_PNG_1PX =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
+/** dsh ≥0.2.0 契约：apply(ctx, config) 第二参是 volatile getter 形态
+ *  （config.<field>.get() 返回当前 live 值，见官方 dsh-agent-default-model）。 */
+function makeVolatileConfig(values) {
+  const v = values ?? {};
+  const field = (key) => ({ get: () => v[key] });
+  return {
+    visionProvider: field("visionProvider"),
+    visionModel: field("visionModel"),
+    visionPrompt: field("visionPrompt"),
+    uploadMaxBytes: field("uploadMaxBytes"),
+    openAccess: field("openAccess"),
+  };
+}
+
+/** dsh ≥0.2.0 settings 服务形态（register/scope 已移除；describe/update/replace/
+ *  mutate/configure 按 profile entry id 寻址）。updates 记录 (ns, patch) 供断言。 */
+function makeSettingsService({ updates } = {}) {
+  return {
+    describe: () => [],
+    update: async (ns, patch) => { if (updates) updates.push({ ns, patch }); },
+    replace: async (ns, section) => { if (updates) updates.push({ ns, patch: section, replace: true }); },
+    mutate: async () => {},
+    configure: () => () => {},
+  };
+}
+
+/** 统一 apply 入口：补 volatile config 第二参（dsh ≥0.2.0 契约）。 */
+function applyEntry(mod, ctx) {
+  mod.apply(ctx, makeVolatileConfig(ctx.__settingsValue));
+}
+
 /** 用给定服务行为构造 fake ctx，apply 后取出 vision_understand 工具。 */
 function makeVisionHarness(overrides) {
   const registeredTools = [];
@@ -513,7 +558,8 @@ function makeVisionHarness(overrides) {
     on: () => {},
     tools: { register: (tool) => { registeredTools.push(tool); } },
     systemPrompt: { section: (section) => { sections.push(section); } },
-    settings: { register: () => ({ get: () => overrides.settingsValue ?? {} }) },
+    settings: makeSettingsService(),
+    __settingsValue: overrides.settingsValue ?? {},
     attachments: {
       imageLimits: {
         maxImageBytes: 10 * 1024 * 1024,
@@ -551,7 +597,7 @@ function makeVisionHarness(overrides) {
 /** apply 一次并执行 vision_understand.execute。 */
 async function runVisionTool(mod, overrides, args) {
   const { ctx, registeredTools } = makeVisionHarness(overrides);
-  mod.apply(ctx);
+  applyEntry(mod, ctx);
   const tool = registeredTools.find((tool2) => tool2.name === "vision_understand");
   if (!tool) throw new Error("apply() 未注册 vision_understand");
   return tool.execute(args, { signal: new AbortController().signal });
@@ -586,7 +632,7 @@ const visionExecuteGate = gate(
       // 成功路径 1：自动发现声明 image 模态的模型
       try {
         const { ctx, registeredTools } = makeVisionHarness({});
-        mod.apply(ctx);
+        applyEntry(mod, ctx);
         const tool = registeredTools.find((t) => t.name === "vision_understand");
         const result = await tool.execute({ image: VISION_PNG_1PX, prompt: "what is this?" }, { signal: new AbortController().signal });
         assertVisionSuccess(result, problems, "自动发现");
@@ -664,7 +710,7 @@ function makeFakeRes() {
   return res;
 }
 
-/** apply 后捕获 webServer 注册的路由；settings.get 返回给定值。 */
+/** apply 后捕获 webServer 注册的路由；settings 经 volatile config 返回给定值。 */
 function makeUploadHarness(settingsValue) {
   const registered = [];
   const ctx = {
@@ -672,7 +718,8 @@ function makeUploadHarness(settingsValue) {
     on: () => {},
     tools: { register: () => {} },
     systemPrompt: { section: () => {} },
-    settings: { register: () => ({ get: () => settingsValue ?? {} }) },
+    settings: makeSettingsService(),
+    __settingsValue: settingsValue ?? {},
     llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
     attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
     agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
@@ -712,7 +759,7 @@ const stashExecuteGate = gate(
       const mod = await import(pathToFileURL(join(ROOT, "index.mjs")).href);
       const problems = [];
       const { ctx, registered } = makeUploadHarness({ uploadMaxBytes: 0 });
-      mod.apply(ctx);
+      applyEntry(mod, ctx);
       const stash = routeHandler(registered, "/api/dsh-rider-stash", "stash-execute");
       const restage = routeHandler(registered, "/api/dsh-rider-stash/restage", "stash-execute");
       const read = routeHandler(registered, "/api/dsh-rider-stash/read", "stash-execute");
@@ -770,7 +817,7 @@ const stashExecuteGate = gate(
       if (empty.status !== 400) problems.push(`空内容未被 400 拒绝：HTTP ${empty.status} ${empty.raw}`);
       // 大小上限：1MB 上限拒 2MB
       const small = makeUploadHarness({ uploadMaxBytes: 1 });
-      mod.apply(small.ctx);
+      applyEntry(mod, small.ctx);
       const smallStash = routeHandler(small.registered, "/api/dsh-rider-stash", "stash-execute");
       const tooLarge = await callUpload(smallStash, {
         method: "POST",
@@ -869,15 +916,17 @@ function makeFakeConnection() {
 function makeOpenAccessHarness(settingsValue, connection) {
   const registered = [];
   const updates = [];
+  const settings = makeSettingsService({ updates });
   const ctx = {
     effect: (fn) => { fn(); },
     on: () => {},
     // 对齐 cordis ctx.inject：服务可用时同步回调（真实实现为就绪后回调）。
     inject: (names, cb) => { cb(ctx); },
-    get: (name) => (name === "connection" ? connection : undefined),
+    get: (name) => (name === "connection" ? connection : name === "settings" ? settings : undefined),
     tools: { register: () => {} },
     systemPrompt: { section: () => {} },
-    settings: { register: () => ({ get: () => settingsValue ?? {}, update: async (patch) => { updates.push(patch); } }) },
+    settings,
+    __settingsValue: settingsValue ?? {},
     llm: { listProviders: async () => [], listModels: async () => [], resolveModelInfo: async () => ({}), stream: async function* () {} },
     attachments: { imageLimits: { maxImageBytes: 1 }, saveImage: async () => ({}), readImage: async () => ({}) },
     agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
@@ -902,7 +951,7 @@ const openAccessGate = gate(
       {
         const fake = makeFakeConnection();
         const { ctx } = makeOpenAccessHarness({ openAccess: true }, fake.connection);
-        mod.apply(ctx);
+        applyEntry(mod, ctx);
         await flush();
         if (fake.connection.authorizeIndex() !== true) problems.push("启动施加后 authorizeIndex 未放行");
         if (fake.connection.requestRejection() !== undefined) problems.push("启动施加后 requestRejection 未放行");
@@ -912,7 +961,7 @@ const openAccessGate = gate(
       {
         const fake = makeFakeConnection();
         const { ctx } = makeOpenAccessHarness({}, fake.connection);
-        mod.apply(ctx);
+        applyEntry(mod, ctx);
         await flush();
         if (fake.connection.authorizeIndex() !== false) problems.push("开关关闭时启动不应遮蔽 authorizeIndex");
       }
@@ -922,7 +971,7 @@ const openAccessGate = gate(
         const { ctx } = makeOpenAccessHarness({ openAccess: true }, fake.connection);
         delete ctx.inject;
         try {
-          mod.apply(ctx);
+          applyEntry(mod, ctx);
           await flush();
         } catch (error) {
           problems.push(`无 inject 的 ctx 启动路径崩溃：${error.message}`);
@@ -932,7 +981,7 @@ const openAccessGate = gate(
       // 路由：GET 状态 / POST 开关 / 400 / 405 / connection 缺失
       const fake = makeFakeConnection();
       const { ctx, registered, updates } = makeOpenAccessHarness({ openAccess: false }, fake.connection);
-      mod.apply(ctx);
+      applyEntry(mod, ctx);
       const route = registered.find((r) => r.path === "/api/dsh-rider-open-access");
       if (!route || typeof route.handler !== "function") {
         problems.push("未注册 /api/dsh-rider-open-access 路由");
@@ -952,7 +1001,7 @@ const openAccessGate = gate(
         if (on.status !== 200 || on.body?.ok !== true || on.body?.enabled !== true || on.body?.bypassActive !== true) {
           problems.push(`POST 开启失败：HTTP ${on.status} ${on.raw}`);
         }
-        if (!updates.some((u) => u?.openAccess === true)) problems.push("POST 开启未写 settings");
+        if (!updates.some((u) => u?.ns === "dsh-rider" && u?.patch?.openAccess === true)) problems.push("POST 开启未写 settings");
         if (fake.connection.requestRejection() !== undefined) problems.push("POST 开启后 requestRejection 未放行");
         // POST 关闭：即时还原原实现（行为恢复 + 遮蔽标记清除）
         const off = await call("POST", { enabled: false });
@@ -972,7 +1021,7 @@ const openAccessGate = gate(
       // connection 缺失：GET 返回 bypassActive=false；POST 不崩（安全降级）
       {
         const { ctx: ctxNoConn, registered: regNoConn } = makeOpenAccessHarness({}, undefined);
-        mod.apply(ctxNoConn);
+        applyEntry(mod, ctxNoConn);
         const route2 = regNoConn.find((r) => r.path === "/api/dsh-rider-open-access");
         const g2 = await callUpload(route2.handler, { method: "GET" });
         if (g2.status !== 200 || g2.body?.bypassActive !== false) problems.push(`connection 缺失 GET 应返回 bypassActive=false：${g2.raw}`);
@@ -983,7 +1032,7 @@ const openAccessGate = gate(
       {
         const { ctx: ctxBad, registered: regBad } = makeOpenAccessHarness({ openAccess: true }, {});
         try {
-          mod.apply(ctxBad);
+          applyEntry(mod, ctxBad);
           await flush();
         } catch (error) {
           problems.push(`connection 形状不符时启动路径崩溃：${error.message}`);
@@ -1012,19 +1061,14 @@ const openAccessGate = gate(
 /* -------------------------- client bundle 门禁 -------------------------- */
 
 const CLIENT_PATH = join(ROOT, "client", "index.js");
-// 平台静态词白名单（对齐 dsh-client-web getStaticModules 的 seed 表）——
-// client bundle 只允许 require 这些词，跨插件值 import 被 client-modules 禁止。
+// 平台静态词白名单（对齐官方 cordis-plugin-development 契约：client bundle 只允许
+// 平台基线词 react/react-dom；不得 import 任何 Harness Client 包——含
+// dsh-client-ui-primitives，官方 skill 明令禁止（0.2.0 适配收紧））。
 const CLIENT_REQUIRE_ALLOWED = new Set([
   "react",
   "react/jsx-runtime",
   "react-dom",
   "react-dom/client",
-  "@deepseek-ai/cordis",
-  "@deepseek-ai/dsh-client-ui-slots",
-  "@deepseek-ai/dsh-client-web-react",
-  "@deepseek-ai/dsh-client-ui-primitives",
-  "@deepseek-ai/dsh-client-ui-attachment",
-  "@deepseek-ai/dsh-client-schema-form",
 ]);
 
 /** client bundle 机械检查：注册通道、require 白名单、导出契约。 */
@@ -1225,6 +1269,12 @@ const clientBundleGate = gate(
     const problems2 = checkClientBundleText(bad2);
     if (problems2.length === 0 || !problems2.some((p) => p.includes("白名单外"))) {
       problems.push("自证失败：白名单外 require 的样例未被拒绝");
+    }
+    // 官方 0.2.0 纯净性契约：Harness Client 包（含 primitives）必须被拒。
+    const bad3 = "window.__ModuleLoader__.load({ id: 'dsh-rider', factory: (require) => {\n  const { Button } = require('@deepseek-ai/dsh-client-ui-primitives');\n  exports.name = 'dsh-rider'; exports.inject = []; exports.apply = () => { void Button; };\n  return module.exports;\n} });\n";
+    const problems3 = checkClientBundleText(bad3);
+    if (problems3.length === 0 || !problems3.some((p) => p.includes("dsh-client-ui-primitives"))) {
+      problems.push("自证失败：require Harness Client 包（primitives）的样例未被拒绝");
     }
     return problems;
   },
